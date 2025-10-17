@@ -165,11 +165,12 @@ def _list_active_providers() -> List[str]:
         try:
             rows = session.query(AIProvider.name).filter_by(is_active=True).all()
             providers = [name.lower() for (name,) in rows]
+            logger.info(f"[KG-Worker] 从数据库查询到 {len(providers)} 个激活的 AIProvider: {providers}")
             return providers
         finally:
             session.close()
     except Exception as e:
-        logger.error(f"加载 AIProvider 列表失败: {e}")
+        logger.error(f"加载 AIProvider 列表失败: {e}", exc_info=True)
         return []
 
 
