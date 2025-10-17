@@ -18,6 +18,12 @@ import logging
 import signal
 from pathlib import Path
 
+# 添加父目录到 Python 路径（以便导入 src 模块）
+parent_dir = Path(__file__).parent.parent.resolve()
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+    print(f"✓ 已添加父目录到 Python 路径: {parent_dir}")
+
 # 加载 .env 文件
 try:
     from dotenv import load_dotenv
@@ -154,11 +160,49 @@ def main():
     except Exception as e:
         logger.warning(f"获取进程统计失败: {e}")
 
-    # 保持主进程运行
+    # 启动心跳注册
+    from datetime import datetime
+    started_at = datetime.now().isoformat()
+
+    def register_heartbeat():
+        """注册节点心跳到 Redis"""
+        try:
+            from src.utils.redis_client import get_redis_client
+            redis_client = get_redis_client()
+            if not redis_client:
+                return
+
+            node_info = {
+                'node_id': node_name,
+                'node_type': 'worker',
+                'workers_per_provider': per_provider,
+                'pid': os.getpid(),
+                'started_at': started_at,
+                'last_heartbeat': datetime.now().isoformat()
+            }
+
+            key = f"kg:nodes:{node_name}"
+            redis_client.hmset(key, node_info)
+            redis_client.expire(key, 180)  # 3分钟过期
+            logger.debug(f"节点心跳已注册: {node_name}")
+        except Exception as e:
+            logger.warning(f"注册节点心跳失败: {e}")
+
+    # 首次注册心跳
+    register_heartbeat()
+
+    # 保持主进程运行，定期更新心跳
     logger.info("Worker 节点运行中... (按 Ctrl+C 停止)")
+    heartbeat_counter = 0
     try:
         while not _shutdown_requested:
             time.sleep(1)
+            heartbeat_counter += 1
+
+            # 每60秒更新一次心跳
+            if heartbeat_counter % 60 == 0:
+                register_heartbeat()
+                logger.debug(f"[心跳] Worker 节点 [{node_name}] 运行正常")
     except KeyboardInterrupt:
         logger.info("收到键盘中断")
 
