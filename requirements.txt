@@ -1,0 +1,17 @@
+# 知识图谱 Worker 独立服务依赖
+
+# 数据库
+SQLAlchemy==2.0.21
+PyMySQL==1.1.0
+neo4j>=5.28.0,<6.0.0
+
+# 缓存与队列
+redis>=5.0.0,<6.0.0
+
+# HTTP 客户端
+httpx==0.25.0
+requests>=2.32.0,<3.0.0
+
+# 工具库
+python-dotenv==1.0.0
+chardet>=5.2.0,<6.0.0

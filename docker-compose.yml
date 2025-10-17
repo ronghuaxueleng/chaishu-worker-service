@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  kg-worker:
+    build: .
+    container_name: kg-worker-1
+    restart: unless-stopped
+
+    environment:
+      # Redis 配置
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: ${REDIS_DB:-0}
+
+      # MySQL 配置
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-chaishu}
+
+      # Neo4j 配置
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+
+      # Worker 配置
+      KG_WORKER_NODE_NAME: ${KG_WORKER_NODE_NAME:-docker-worker-1}
+      KG_WORKERS_PER_PROVIDER: ${KG_WORKERS_PER_PROVIDER:-4}
+      KG_WORKER_PROVIDERS: ${KG_WORKER_PROVIDERS:-}
+      KG_MAX_TOTAL_PROCESSES: ${KG_MAX_TOTAL_PROCESSES:-50}
+      KG_MAX_PROCESSES_PER_PROVIDER: ${KG_MAX_PROCESSES_PER_PROVIDER:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DOCKER_ENV: "true"
+
+    volumes:
+      - ./logs:/app/logs
+
+    networks:
+      - chaishu-network
+
+    # 资源限制（可选）
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+networks:
+  chaishu-network:
+    external: true
+    # 如果网络不存在，使用: docker network create chaishu-network
