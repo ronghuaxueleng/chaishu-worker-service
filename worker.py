@@ -40,13 +40,20 @@ except Exception as e:
 
 # 配置日志
 log_level = os.environ.get('LOG_LEVEL', 'INFO').upper()
+handlers = [logging.StreamHandler()]
+
+# 尝试添加文件日志（可选）
+try:
+    log_dir = Path(__file__).parent / 'logs'
+    log_dir.mkdir(exist_ok=True)
+    handlers.append(logging.FileHandler(log_dir / 'worker.log'))
+except Exception as e:
+    print(f"⚠ 无法创建日志文件: {e}，将仅使用控制台输出")
+
 logging.basicConfig(
     level=getattr(logging, log_level, logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/worker.log')
-    ]
+    handlers=handlers
 )
 logger = logging.getLogger(__name__)
 
@@ -96,9 +103,18 @@ def main():
     # 打印横幅
     print_banner()
 
+    print(">>> [DEBUG] 开始初始化 Worker 节点...")
+    sys.stdout.flush()
+
     # 注册信号处理
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    try:
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        print(">>> [DEBUG] 信号处理器注册成功")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f">>> [DEBUG] 信号处理器注册失败（Kaggle环境可能不支持）: {e}")
+        sys.stdout.flush()
 
     # 获取配置
     node_name = os.environ.get('KG_WORKER_NODE_NAME', 'worker-node')
@@ -109,6 +125,9 @@ def main():
 
     if providers:
         providers = [p.strip() for p in providers.split(',') if p.strip()]
+
+    print(">>> [DEBUG] 配置读取完成，准备输出配置信息...")
+    sys.stdout.flush()
 
     logger.info("=" * 60)
     logger.info("知识图谱 Worker 节点启动")
@@ -127,20 +146,41 @@ def main():
     logger.info(f"Neo4j: {os.environ.get('NEO4J_URI')}")
     logger.info("=" * 60)
 
+    print(">>> [DEBUG] 配置信息输出完成")
+    sys.stdout.flush()
+
     # 验证环境变量
+    print(">>> [DEBUG] 开始验证环境变量...")
+    sys.stdout.flush()
+
     if not validate_environment():
         logger.error("环境验证失败，退出")
         sys.exit(1)
 
+    print(">>> [DEBUG] 环境变量验证通过")
+    sys.stdout.flush()
+
     # 导入 Worker 模块
+    print(">>> [DEBUG] 开始导入 Worker 模块...")
+    sys.stdout.flush()
+
     try:
         from src.services.kg_task_worker import start_kg_task_workers, stop_all_workers
         logger.info("✓ Worker 模块导入成功")
+        print(">>> [DEBUG] Worker 模块导入成功")
+        sys.stdout.flush()
     except Exception as e:
         logger.error(f"✗ Worker 模块导入失败: {e}")
+        print(f">>> [DEBUG] Worker 模块导入失败: {e}")
+        sys.stdout.flush()
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     # 启动 Worker 进程
+    print(">>> [DEBUG] 准备启动 Worker 进程...")
+    sys.stdout.flush()
+
     try:
         logger.info("正在启动 Worker 进程...")
         start_kg_task_workers(
@@ -148,8 +188,14 @@ def main():
             per_provider_processes=per_provider
         )
         logger.info("✓ Worker 进程已启动，节点进入运行状态")
+        print(">>> [DEBUG] Worker 进程已启动")
+        sys.stdout.flush()
     except Exception as e:
         logger.error(f"✗ Worker 启动失败: {e}", exc_info=True)
+        print(f">>> [DEBUG] Worker 启动失败: {e}")
+        sys.stdout.flush()
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     # 显示活跃进程信息
