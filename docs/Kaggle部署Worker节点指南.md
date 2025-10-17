@@ -38,7 +38,7 @@
    ```bash
    # 进入项目根目录
    cd chaishu-vue3
-
+   
    # 创建 ZIP 包（排除不必要的文件）
    zip -r chaishu-vue3.zip . \
      -x "*.git*" \
@@ -464,4 +464,3 @@ Kaggle 节点停止后：
 
 **版本**: v1.0
 **更新日期**: 2025-10-17
-**维护者**: Claude Code

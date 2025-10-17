@@ -9,7 +9,7 @@
 cp -r /path/to/chaishu-vue3/worker-service ./
 
 # 或者如果单独创建了仓库
-git clone https://github.com/你的用户名/worker-service.git
+git clone https://github.com/ronghuaxueleng/chaishu-worker-service.git
 cd worker-service
 ```
 
