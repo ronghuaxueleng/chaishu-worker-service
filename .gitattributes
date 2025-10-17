@@ -1,0 +1,9 @@
+# 确保 Shell 脚本使用 LF 行尾符
+*.sh text eol=lf
+
+# Python 文件使用 LF
+*.py text eol=lf
+
+# 配置文件使用 LF
+*.env text eol=lf
+.env.* text eol=lf
