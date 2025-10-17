@@ -237,10 +237,19 @@ def main():
     def register_heartbeat():
         """注册节点心跳到 Redis"""
         try:
+            print(">>> [DEBUG] 正在连接 Redis...")
+            sys.stdout.flush()
+
             from src.utils.redis_client import get_redis_client
             redis_client = get_redis_client()
+
             if not redis_client:
-                return
+                print(">>> [ERROR] Redis 客户端连接失败（返回 None）")
+                sys.stdout.flush()
+                return False
+
+            print(">>> [DEBUG] Redis 连接成功，准备写入心跳数据...")
+            sys.stdout.flush()
 
             node_info = {
                 'node_id': node_name,
@@ -252,15 +261,33 @@ def main():
             }
 
             key = f"kg:nodes:{node_name}"
+            print(f">>> [DEBUG] 写入 Redis 键: {key}")
+            print(f">>> [DEBUG] 节点信息: {node_info}")
+            sys.stdout.flush()
+
             redis_client.hmset(key, node_info)
             redis_client.expire(key, 180)  # 3分钟过期
+
+            print(f">>> [DEBUG] Redis 写入成功！键 {key} 已设置，过期时间 180 秒")
+            sys.stdout.flush()
+
             logger.debug(f"节点心跳已注册: {node_name}")
+            return True
+
         except Exception as e:
+            print(f">>> [ERROR] 注册节点心跳失败: {e}")
+            sys.stdout.flush()
+            import traceback
+            traceback.print_exc()
             logger.warning(f"注册节点心跳失败: {e}")
+            return False
 
     # 首次注册心跳
-    register_heartbeat()
-    print(">>> [DEBUG] 节点心跳已注册")
+    heartbeat_success = register_heartbeat()
+    if heartbeat_success:
+        print(">>> [SUCCESS] ✓ 节点心跳已成功注册到 Redis")
+    else:
+        print(">>> [WARNING] ⚠ 节点心跳注册失败，Worker 可在本地运行但主节点无法监控")
     sys.stdout.flush()
 
     # 保持主进程运行，定期更新心跳
