@@ -290,9 +290,38 @@ def main():
         print(">>> [WARNING] ⚠ 节点心跳注册失败，Worker 可在本地运行但主节点无法监控")
     sys.stdout.flush()
 
+    # 输出 Redis 连接详情和监听队列信息
+    print("\n" + "=" * 60)
+    print("📡 连接信息")
+    print("=" * 60)
+    redis_host = os.environ.get('REDIS_HOST', 'localhost')
+    redis_port = os.environ.get('REDIS_PORT', '6379')
+    redis_db = os.environ.get('REDIS_DB', '0')
+    print(f"Redis 地址: {redis_host}:{redis_port} (DB: {redis_db})")
+    print(f"MySQL 地址: {os.environ.get('DB_HOST', 'N/A')}")
+    print(f"Neo4j 地址: {os.environ.get('NEO4J_URI', 'N/A')}")
+
+    # 显示监听的队列
+    print(f"\n🔊 监听队列")
+    print("=" * 60)
+    active_providers = []
+    if stats.get('providers'):
+        active_providers = list(stats['providers'].keys())
+
+    if active_providers:
+        for provider in active_providers:
+            queue_key = f"kg:ai_queue:{provider}"
+            print(f"  • Provider: {provider}")
+            print(f"    队列键: {queue_key}")
+    else:
+        print("  ⚠ 未发现活跃的 Provider")
+
+    print("=" * 60 + "\n")
+    sys.stdout.flush()
+
     # 保持主进程运行，定期更新心跳
     logger.info("Worker 节点运行中... (按 Ctrl+C 停止)")
-    print("\n🚀 Worker 节点正在运行...")
+    print("🚀 Worker 节点正在运行...")
     print("   • 节点名称:", node_name)
     print("   • 主进程 PID:", os.getpid())
     print("   • 按 Ctrl+C 可以停止 Worker\n")
