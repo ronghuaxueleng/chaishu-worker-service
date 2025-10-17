@@ -373,7 +373,7 @@ class KnowledgeGraphChapterStatus(Base):
     completed_at = Column(DateTime)  # 完成时间
 
     # 关联关系
-    kg_task = relationship("KnowledgeGraphTask")
+    kg_task = relationship("KnowledgeGraphTask", overlaps="chapter_statuses")
     chapter = relationship("Chapter")
 
 class KnowledgeGraphConfig(Base):
