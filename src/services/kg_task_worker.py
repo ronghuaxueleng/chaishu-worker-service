@@ -99,14 +99,24 @@ def kg_task_worker_process(provider: str):
             # 记录当前进程正在处理的任务到 Redis
             try:
                 from src.utils.redis_client import get_redis_client
+                import socket
                 redis_client = get_redis_client()
                 if redis_client:
+                    # 获取节点名称（优先使用环境变量，否则使用主机名）
+                    node_name = os.environ.get('KG_WORKER_NODE_NAME')
+                    if not node_name:
+                        try:
+                            node_name = socket.gethostname()
+                        except:
+                            node_name = 'unknown'
+
                     worker_key = f"kg:worker:{os.getpid()}"
                     redis_client.hmset(worker_key, {
                         'provider': provider,
                         'task_id': task_id,
                         'start_time': time.time(),
-                        'pid': os.getpid()
+                        'pid': os.getpid(),
+                        'node_name': node_name
                     })
                     redis_client.expire(worker_key, 3600)  # 1小时过期
             except Exception as e:
@@ -313,7 +323,7 @@ def get_worker_stats() -> dict:
         prov['alive'] += 1 if p.is_alive() else 0
         prov['pids'].append(p.pid)
 
-    # 从 Redis 读取每个进程正在处理的任务
+    # 从 Redis 读取每个进程正在处理的任务和节点信息
     try:
         redis_client = get_redis_client()
         if redis_client:
@@ -324,6 +334,12 @@ def get_worker_stats() -> dict:
                     if worker_info:
                         task_id = worker_info.get('task_id')
                         start_time = worker_info.get('start_time')
+                        node_name = worker_info.get('node_name')  # 读取节点名称
+
+                        # 解码 node_name（如果是 bytes）
+                        if isinstance(node_name, bytes):
+                            node_name = node_name.decode()
+
                         if task_id:
                             try:
                                 task_id = int(task_id)
@@ -344,12 +360,17 @@ def get_worker_stats() -> dict:
                                 except Exception:
                                     pass
 
+                                # 如果没有 node_name 字段，说明是旧版本 Worker，需要重启
+                                if not node_name:
+                                    node_name = '旧版本(需重启)'
+
                                 prov_data['active_tasks'].append({
                                     'task_id': task_id,
                                     'task_name': task_name,
                                     'pid': pid,
                                     'start_time': start_time_float,
-                                    'duration': duration
+                                    'duration': duration,
+                                    'node_name': node_name
                                 })
                             except Exception as e:
                                 logger.warning(f"解析Worker任务信息失败: {e}")
