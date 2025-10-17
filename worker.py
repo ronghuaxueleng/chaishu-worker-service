@@ -199,14 +199,38 @@ def main():
         sys.exit(1)
 
     # 显示活跃进程信息
+    print(">>> [DEBUG] 获取进程统计...")
+    sys.stdout.flush()
+
     try:
         from src.services.kg_task_worker import get_worker_stats
         stats = get_worker_stats()
         logger.info(f"活跃进程统计: {stats}")
+
+        print(f"\n{'=' * 60}")
+        print("✓ Worker 节点启动成功！")
+        print(f"{'=' * 60}")
+
+        if stats.get('providers'):
+            print(f"\n📊 进程统计:")
+            for provider, info in stats['providers'].items():
+                print(f"  • {provider}: {info.get('alive', 0)} 个活跃进程")
+                print(f"    - 队列长度: {info.get('queue_length', 0)}")
+                if info.get('pids'):
+                    print(f"    - PID: {', '.join(map(str, info['pids']))}")
+        else:
+            print("\n⚠ 警告: 未检测到活跃的 Worker 进程")
+
+        print(f"\n{'=' * 60}\n")
+        sys.stdout.flush()
     except Exception as e:
         logger.warning(f"获取进程统计失败: {e}")
+        print(f">>> [DEBUG] 获取进程统计失败: {e}")
+        sys.stdout.flush()
 
     # 启动心跳注册
+    print(">>> [DEBUG] 注册节点心跳...")
+    sys.stdout.flush()
     from datetime import datetime
     started_at = datetime.now().isoformat()
 
@@ -236,9 +260,17 @@ def main():
 
     # 首次注册心跳
     register_heartbeat()
+    print(">>> [DEBUG] 节点心跳已注册")
+    sys.stdout.flush()
 
     # 保持主进程运行，定期更新心跳
     logger.info("Worker 节点运行中... (按 Ctrl+C 停止)")
+    print("\n🚀 Worker 节点正在运行...")
+    print("   • 节点名称:", node_name)
+    print("   • 主进程 PID:", os.getpid())
+    print("   • 按 Ctrl+C 可以停止 Worker\n")
+    sys.stdout.flush()
+
     heartbeat_counter = 0
     try:
         while not _shutdown_requested:
