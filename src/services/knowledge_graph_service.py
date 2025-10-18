@@ -3,12 +3,12 @@
 用于管理小说人物、事件的知识图谱
 """
 import logging
+import os
 import time
 from functools import wraps
 from typing import Dict, List, Any, Optional, Tuple
 from neo4j import GraphDatabase, exceptions
 from neo4j.exceptions import ServiceUnavailable
-from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +57,10 @@ class KnowledgeGraphService:
 
         for attempt in range(max_retries):
             try:
-                config = get_config()
-                neo4j_config = config.get('neo4j', {})
-
-                uri = neo4j_config.get('uri', 'neo4j://localhost:7687')
-                user = neo4j_config.get('user', 'neo4j')
-                password = neo4j_config.get('password', 'password')
+                # 从环境变量读取 Neo4j 配置
+                uri = os.environ.get('NEO4J_URI', 'neo4j://localhost:7687')
+                user = os.environ.get('NEO4J_USER', 'neo4j')
+                password = os.environ.get('NEO4J_PASSWORD', 'password')
 
                 # 配置连接池参数（优化网络稳定性）
                 config_options = {
