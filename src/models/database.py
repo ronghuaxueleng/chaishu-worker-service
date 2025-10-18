@@ -609,21 +609,55 @@ class DatabaseManager:
         return base64.b64decode(encoded_string.encode('utf-8')).decode('utf-8')
     
     def _get_pool_config(self):
-        """获取连接池配置"""
-        try:
-            from ..config import get_database_config
-            return get_database_config().get('pool', {})
-        except ImportError:
-            # 后备方案
+        """获取连接池配置，优先从环境变量读取"""
+        # 从环境变量读取连接池配置
+        pool_config = {}
+
+        # Worker 节点应使用更小的连接池（每个进程只需少量连接）
+        # 默认值：pool_size=2, max_overflow=3，每个进程最多 5 个连接
+        if os.environ.get('DB_POOL_SIZE'):
+            pool_config['pool_size'] = int(os.environ.get('DB_POOL_SIZE'))
+        else:
+            pool_config['pool_size'] = 2  # Worker 节点默认值，主节点可以更大
+
+        if os.environ.get('DB_POOL_MAX_OVERFLOW'):
+            pool_config['max_overflow'] = int(os.environ.get('DB_POOL_MAX_OVERFLOW'))
+        else:
+            pool_config['max_overflow'] = 3  # Worker 节点默认值
+
+        if os.environ.get('DB_POOL_TIMEOUT'):
+            pool_config['pool_timeout'] = int(os.environ.get('DB_POOL_TIMEOUT'))
+        else:
+            pool_config['pool_timeout'] = 30
+
+        if os.environ.get('DB_POOL_RECYCLE'):
+            pool_config['pool_recycle'] = int(os.environ.get('DB_POOL_RECYCLE'))
+        else:
+            pool_config['pool_recycle'] = 3600
+
+        if os.environ.get('DB_POOL_PRE_PING'):
+            pool_config['pool_pre_ping'] = os.environ.get('DB_POOL_PRE_PING').lower() in ('true', '1', 'yes')
+        else:
+            pool_config['pool_pre_ping'] = True
+
+        logger.info(f"[数据库] 连接池配置: pool_size={pool_config['pool_size']}, max_overflow={pool_config['max_overflow']}, 最大连接数={pool_config['pool_size'] + pool_config['max_overflow']}")
+
+        # 如果环境变量未配置，尝试从 config.json 读取
+        if not pool_config:
             try:
-                config_path = os.path.join(os.path.dirname(__file__), '../../config/config.json')
-                if os.path.exists(config_path):
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        config = json.load(f)
-                    return config.get('database', {}).get('pool', {})
-            except Exception:
-                pass
-        return {}
+                from ..config import get_database_config
+                return get_database_config().get('pool', {})
+            except ImportError:
+                # 后备方案
+                try:
+                    config_path = os.path.join(os.path.dirname(__file__), '../../config/config.json')
+                    if os.path.exists(config_path):
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            config = json.load(f)
+                        return config.get('database', {}).get('pool', {})
+                except Exception:
+                    pass
+        return pool_config
     
     def _get_database_url_from_config(self):
         """从配置文件获取数据库URL，优先使用环境变量，默认使用SQLite，支持base64编码"""
