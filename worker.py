@@ -7,9 +7,15 @@
 - KG_WORKER_NODE_NAME: 节点名称（用于标识）
 - KG_WORKERS_PER_PROVIDER: 每个 Provider 启动的进程数（默认2）
 - KG_WORKER_PROVIDERS: 指定 Providers（逗号分隔，可选）
+- KG_WORKER_GUARD_INTERVAL: 守护线程检查间隔秒数（默认30）
 - KG_MAX_TOTAL_PROCESSES: 最大总进程数（默认50）
 - KG_MAX_PROCESSES_PER_PROVIDER: 单Provider最大进程数（默认10）
 - REDIS_HOST, DB_HOST, NEO4J_URI: 共享服务配置
+
+特性：
+- ✅ 自动发现激活的 AI 服务商
+- ✅ 守护线程自动为新增的 AI 服务商启动 Worker
+- ✅ 定期心跳注册，主节点可监控子节点状态
 """
 import os
 import sys
@@ -181,7 +187,7 @@ def main():
     sys.stdout.flush()
 
     try:
-        from src.services.kg_task_worker import start_kg_task_workers, stop_all_workers
+        from src.services.kg_task_worker import start_kg_task_workers, stop_all_workers, start_auto_worker_guard
         logger.info("✓ Worker 模块导入成功")
         print(">>> [DEBUG] Worker 模块导入成功")
         sys.stdout.flush()
@@ -242,6 +248,22 @@ def main():
     except Exception as e:
         logger.warning(f"获取进程统计失败: {e}")
         print(f">>> [DEBUG] 获取进程统计失败: {e}")
+        sys.stdout.flush()
+
+    # 启动守护线程，自动为新增的 AI 服务商启动 Worker
+    print(">>> [DEBUG] 启动 Worker 守护线程...")
+    sys.stdout.flush()
+
+    try:
+        # 获取守护线程间隔配置（默认30秒）
+        guard_interval = int(os.environ.get('KG_WORKER_GUARD_INTERVAL', '30'))
+        start_auto_worker_guard(interval_seconds=guard_interval)
+        logger.info(f"✓ Worker 守护线程已启动，检查间隔: {guard_interval}秒")
+        print(f">>> [DEBUG] Worker 守护线程已启动，检查间隔: {guard_interval}秒")
+        sys.stdout.flush()
+    except Exception as e:
+        logger.warning(f"⚠ 守护线程启动失败: {e}")
+        print(f">>> [WARNING] 守护线程启动失败: {e}，将无法自动为新增的 AI 服务商启动 Worker")
         sys.stdout.flush()
 
     # 启动心跳注册
