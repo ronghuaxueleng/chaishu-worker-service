@@ -17,69 +17,70 @@ class KnowledgeGraphConfigService:
     def get_default_config(self) -> Optional[KnowledgeGraphConfig]:
         """获取默认配置（带缓存）"""
         if self._default_config is None:
-            session = db_manager.get_session()
-            try:
-                self._default_config = session.query(KnowledgeGraphConfig).filter_by(
-                    is_default=True
-                ).first()
-                
-                # 如果没有默认配置，创建一个基础配置
-                if not self._default_config:
-                    logger.warning("未找到默认知识图谱配置，使用基础配置")
-                    # 返回一个临时配置对象，不保存到数据库
-                    class TempConfig:
-                        def __init__(self):
-                            self.ai_provider = None
-                            self.ai_model = None
-                            self.use_ai = False
-                            self.max_content_length = 4000
-                            self.enable_entity_extraction = True
-                            self.enable_relation_extraction = True
-                            self.entity_types = [
-                                {"type": "character", "name": "人物", "enabled": True},
-                                {"type": "location", "name": "地点", "enabled": True}, 
-                                {"type": "organization", "name": "组织", "enabled": True},
-                                {"type": "event", "name": "事件", "enabled": True}
-                            ]
-                            self.relation_types = [
-                                {"type": "FRIEND", "name": "朋友", "enabled": True},
-                                {"type": "ENEMY", "name": "敌人", "enabled": True},
-                                {"type": "LOVES", "name": "爱慕", "enabled": True},
-                                {"type": "HATES", "name": "仇恨", "enabled": True},
-                                {"type": "KNOWS", "name": "认识", "enabled": True},
-                                {"type": "LEADS", "name": "领导", "enabled": True},
-                                {"type": "FOLLOWS", "name": "跟随", "enabled": True},
-                                {"type": "PARTICIPATES_IN", "name": "参与", "enabled": True},
-                                {"type": "OCCURS_IN", "name": "发生于", "enabled": True}
-                            ]
-                            self.rule_config = {
-                                "character_patterns": [
-                                    r'(?:道|说|叫|呼|唤|见|看|听)[道说]?"([一-龯]{2,4})"',
-                                    r'"([一-龯]{2,4})"(?:道|说|叫|呼|问|答)',
-                                    r'([一-龯]{2,4})(?:大师|先生|小姐|公子|少爷|姑娘)',
-                                    r'(?:师父|师兄|师姐|师弟|师妹)([一-龯]{2,4})'
-                                ],
-                                "location_patterns": [
-                                    r'(?:来到|到了|在)([一-龯]{2,6}(?:山|峰|谷|洞|城|镇|村|府|宫|殿|楼|阁|院|房|堂))',
-                                    r'([一-龯]{2,6}(?:山|峰|谷|洞|城|镇|村|府|宫|殿|楼|阁|院|房|堂))(?:中|内|里|上|下)'
-                                ],
-                                "filter_words": ["什么", "这样", "那样", "如何", "怎么", "为何", "哪里", "这里", "那里"]
-                            }
-                    
-                    self._default_config = TempConfig()
-                    
-            finally:
-                session.close()
-        
+            with db_manager.get_session() as session:
+                try:
+                    self._default_config = session.query(KnowledgeGraphConfig).filter_by(
+                        is_default=True
+                    ).first()
+
+                    # 如果没有默认配置，创建一个基础配置
+                    if not self._default_config:
+                        logger.warning("未找到默认知识图谱配置，使用基础配置")
+                        # 返回一个临时配置对象，不保存到数据库
+                        class TempConfig:
+                            def __init__(self):
+                                self.ai_provider = None
+                                self.ai_model = None
+                                self.use_ai = False
+                                self.max_content_length = 4000
+                                self.enable_entity_extraction = True
+                                self.enable_relation_extraction = True
+                                self.entity_types = [
+                                    {"type": "character", "name": "人物", "enabled": True},
+                                    {"type": "location", "name": "地点", "enabled": True},
+                                    {"type": "organization", "name": "组织", "enabled": True},
+                                    {"type": "event", "name": "事件", "enabled": True}
+                                ]
+                                self.relation_types = [
+                                    {"type": "FRIEND", "name": "朋友", "enabled": True},
+                                    {"type": "ENEMY", "name": "敌人", "enabled": True},
+                                    {"type": "LOVES", "name": "爱慕", "enabled": True},
+                                    {"type": "HATES", "name": "仇恨", "enabled": True},
+                                    {"type": "KNOWS", "name": "认识", "enabled": True},
+                                    {"type": "LEADS", "name": "领导", "enabled": True},
+                                    {"type": "FOLLOWS", "name": "跟随", "enabled": True},
+                                    {"type": "PARTICIPATES_IN", "name": "参与", "enabled": True},
+                                    {"type": "OCCURS_IN", "name": "发生于", "enabled": True}
+                                ]
+                                self.rule_config = {
+                                    "character_patterns": [
+                                        r'(?:道|说|叫|呼|唤|见|看|听)[道说]?"([一-龯]{2,4})"',
+                                        r'"([一-龯]{2,4})"(?:道|说|叫|呼|问|答)',
+                                        r'([一-龯]{2,4})(?:大师|先生|小姐|公子|少爷|姑娘)',
+                                        r'(?:师父|师兄|师姐|师弟|师妹)([一-龯]{2,4})'
+                                    ],
+                                    "location_patterns": [
+                                        r'(?:来到|到了|在)([一-龯]{2,6}(?:山|峰|谷|洞|城|镇|村|府|宫|殿|楼|阁|院|房|堂))',
+                                        r'([一-龯]{2,6}(?:山|峰|谷|洞|城|镇|村|府|宫|殿|楼|阁|院|房|堂))(?:中|内|里|上|下)'
+                                    ],
+                                    "filter_words": ["什么", "这样", "那样", "如何", "怎么", "为何", "哪里", "这里", "那里"]
+                                }
+
+                        self._default_config = TempConfig()
+                except Exception as e:
+                    session.rollback()
+                    raise
+
         return self._default_config
     
     def get_config_by_id(self, config_id: int) -> Optional[KnowledgeGraphConfig]:
         """根据ID获取配置"""
-        session = db_manager.get_session()
-        try:
-            return session.query(KnowledgeGraphConfig).filter_by(id=config_id).first()
-        finally:
-            session.close()
+        with db_manager.get_session() as session:
+            try:
+                return session.query(KnowledgeGraphConfig).filter_by(id=config_id).first()
+            except Exception as e:
+                session.rollback()
+                raise
     
     def refresh_cache(self):
         """刷新缓存"""

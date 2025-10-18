@@ -292,9 +292,16 @@ class DatabaseService:
             }
     
     def get_novels_query(self):
-        """获取小说查询对象，用于分页和筛选"""
-        session = self.db_manager.get_session()
-        return session.query(Novel).order_by(desc(Novel.created_at))
+        """
+        [已废弃] 获取小说查询对象，用于分页和筛选
+
+        警告：此方法已废弃，因为会导致 session 泄漏。
+        请使用 get_all_novels() 或 get_novels_paginated() 代替。
+        """
+        raise DeprecationWarning(
+            "get_novels_query() 已废弃，会导致数据库连接泄漏。"
+            "请使用 get_all_novels() 或 get_novels_paginated() 代替。"
+        )
     
     def update_novel(self, novel_id: int, **kwargs) -> Optional[Novel]:
         with self.get_session() as session:

@@ -208,13 +208,14 @@ def _list_active_providers() -> List[str]:
     """查询激活的 AIProvider 名称列表（小写）"""
     try:
         from src.models.database import db_manager, AIProvider
-        session = db_manager.get_session()
-        try:
-            rows = session.query(AIProvider.name).filter_by(is_active=True).all()
-            providers = [name.lower() for (name,) in rows]
-            return providers
-        finally:
-            session.close()
+        with db_manager.get_session() as session:
+            try:
+                rows = session.query(AIProvider.name).filter_by(is_active=True).all()
+                providers = [name.lower() for (name,) in rows]
+                return providers
+            except Exception as e:
+                session.rollback()
+                raise
     except Exception as e:
         logger.error(f"加载 AIProvider 列表失败: {e}")
         return []
@@ -490,13 +491,14 @@ def get_worker_stats() -> dict:
                                 task_name = None
                                 try:
                                     from src.models.database import db_manager, KnowledgeGraphTask
-                                    session = db_manager.get_session()
-                                    try:
-                                        task = session.query(KnowledgeGraphTask.task_name).filter_by(id=task_id).first()
-                                        if task:
-                                            task_name = task.task_name
-                                    finally:
-                                        session.close()
+                                    with db_manager.get_session() as session:
+                                        try:
+                                            task = session.query(KnowledgeGraphTask.task_name).filter_by(id=task_id).first()
+                                            if task:
+                                                task_name = task.task_name
+                                        except Exception as e:
+                                            session.rollback()
+                                            raise
                                 except Exception:
                                     pass
 
@@ -631,62 +633,63 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                         active_task_ids.add(task.get('task_id'))
 
                 # 2. 查询数据库中状态为 running 的任务
-                session = db_manager.get_session()
-                try:
-                    running_tasks = session.query(KnowledgeGraphTask.id).filter_by(status='running').all()
-                    running_task_ids = {t.id for t in running_tasks}
+                with db_manager.get_session() as session:
+                    try:
+                        running_tasks = session.query(KnowledgeGraphTask.id).filter_by(status='running').all()
+                        running_task_ids = {t.id for t in running_tasks}
 
-                    # 3. 找出僵尸任务（数据库中 running 但实际未在执行）
-                    zombie_task_ids = running_task_ids - active_task_ids
+                        # 3. 找出僵尸任务（数据库中 running 但实际未在执行）
+                        zombie_task_ids = running_task_ids - active_task_ids
 
-                    if zombie_task_ids:
-                        logger.warning(f"[KG-WorkerGuard] 发现 {len(zombie_task_ids)} 个僵尸任务")
+                        if zombie_task_ids:
+                            logger.warning(f"[KG-WorkerGuard] 发现 {len(zombie_task_ids)} 个僵尸任务")
 
-                        # 4. 逐个检查僵尸任务并修复状态（限制每次最多100个，避免数据库压力）
-                        fixed_count = 0
-                        max_fix_per_check = 100
-                        sample_zombie_ids = list(zombie_task_ids)[:max_fix_per_check]
+                            # 4. 逐个检查僵尸任务并修复状态（限制每次最多100个，避免数据库压力）
+                            fixed_count = 0
+                            max_fix_per_check = 100
+                            sample_zombie_ids = list(zombie_task_ids)[:max_fix_per_check]
 
-                        for task_id in sample_zombie_ids:
-                            task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
-                            if not task:
-                                continue
+                            for task_id in sample_zombie_ids:
+                                task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
+                                if not task:
+                                    continue
 
-                            # 检查任务的完成情况
-                            total_chapters = task.total_chapters or 0
-                            completed = task.completed_chapters or 0
-                            failed = task.failed_chapters or 0
+                                # 检查任务的完成情况
+                                total_chapters = task.total_chapters or 0
+                                completed = task.completed_chapters or 0
+                                failed = task.failed_chapters or 0
 
-                            # 判断任务应该设置为什么状态
-                            if completed >= total_chapters and total_chapters > 0:
-                                # 所有章节已处理完成
-                                task.status = 'completed'
-                                if not task.completed_at:
-                                    from datetime import datetime
-                                    task.completed_at = datetime.now()
-                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 已完成 {completed}/{total_chapters} 章节，修正状态为 completed")
-                            elif task.error_message or failed > 0:
-                                # 有错误记录
-                                task.status = 'failed'
-                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 有错误（失败章节: {failed}），修正状态为 failed")
+                                # 判断任务应该设置为什么状态
+                                if completed >= total_chapters and total_chapters > 0:
+                                    # 所有章节已处理完成
+                                    task.status = 'completed'
+                                    if not task.completed_at:
+                                        from datetime import datetime
+                                        task.completed_at = datetime.now()
+                                    logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 已完成 {completed}/{total_chapters} 章节，修正状态为 completed")
+                                elif task.error_message or failed > 0:
+                                    # 有错误记录
+                                    task.status = 'failed'
+                                    logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 有错误（失败章节: {failed}），修正状态为 failed")
+                                else:
+                                    # 重置为 created，允许重新执行
+                                    task.status = 'created'
+                                    logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 进度 {completed}/{total_chapters}，重置状态为 created")
+
+                                fixed_count += 1
+
+                            session.commit()
+                            remaining = len(zombie_task_ids) - fixed_count
+                            if remaining > 0:
+                                logger.info(f"[KG-WorkerGuard] 本次修复 {fixed_count} 个僵尸任务，剩余 {remaining} 个将在下次检查时处理")
                             else:
-                                # 重置为 created，允许重新执行
-                                task.status = 'created'
-                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 进度 {completed}/{total_chapters}，重置状态为 created")
-
-                            fixed_count += 1
-
-                        session.commit()
-                        remaining = len(zombie_task_ids) - fixed_count
-                        if remaining > 0:
-                            logger.info(f"[KG-WorkerGuard] 本次修复 {fixed_count} 个僵尸任务，剩余 {remaining} 个将在下���检查时处理")
+                                logger.info(f"[KG-WorkerGuard] 已修复所有 {fixed_count} 个僵尸任务")
                         else:
-                            logger.info(f"[KG-WorkerGuard] 已修复所有 {fixed_count} 个僵尸任务")
-                    else:
-                        logger.debug(f"[KG-WorkerGuard] 未发现僵尸任务（{len(running_task_ids)} 个 running 任务都在正常执行）")
+                            logger.debug(f"[KG-WorkerGuard] 未发现僵尸任务（{len(running_task_ids)} 个 running 任务都在正常执行）")
 
-                finally:
-                    session.close()
+                    except Exception as e:
+                        session.rollback()
+                        raise
 
             except Exception as e:
                 logger.error(f"[KG-WorkerGuard] 检查僵尸任务失败: {e}", exc_info=True)
@@ -698,43 +701,44 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                 from src.services.kg_task_queue_service import enqueue_task
                 from src.api.kg_task_routes import _choose_provider_for_ai_task
 
-                session = db_manager.get_session()
-                try:
-                    # 查询 created 状态的任务（限制每次最多启动 20 个）
-                    created_tasks = session.query(KnowledgeGraphTask).filter_by(
-                        status='created'
-                    ).limit(20).all()
+                with db_manager.get_session() as session:
+                    try:
+                        # 查询 created 状态的任务（限制每次最多启动 20 个）
+                        created_tasks = session.query(KnowledgeGraphTask).filter_by(
+                            status='created'
+                        ).limit(20).all()
 
-                    if not created_tasks:
-                        logger.debug("[KG-WorkerGuard] 没有待启动的 created 任务")
-                        return
+                        if not created_tasks:
+                            logger.debug("[KG-WorkerGuard] 没有待启动的 created 任务")
+                            return
 
-                    logger.info(f"[KG-WorkerGuard] 发现 {len(created_tasks)} 个待启动任务，开始自动入队...")
+                        logger.info(f"[KG-WorkerGuard] 发现 {len(created_tasks)} 个待启动任务，开始自动入队...")
 
-                    enqueued_count = 0
-                    for task in created_tasks:
-                        try:
-                            # 选择最优 Provider
-                            if task.use_ai:
-                                provider = _choose_provider_for_ai_task()
-                            else:
-                                provider = 'rules'
+                        enqueued_count = 0
+                        for task in created_tasks:
+                            try:
+                                # 选择最优 Provider
+                                if task.use_ai:
+                                    provider = _choose_provider_for_ai_task()
+                                else:
+                                    provider = 'rules'
 
-                            # 将任务入队
-                            if enqueue_task(task.id, provider):
-                                enqueued_count += 1
-                                logger.info(f"[KG-WorkerGuard] 任务 {task.id} ({task.task_name}) 已入队到 {provider}")
-                            else:
-                                logger.warning(f"[KG-WorkerGuard] 任务 {task.id} 入队失败")
+                                # 将任务入队
+                                if enqueue_task(task.id, provider):
+                                    enqueued_count += 1
+                                    logger.info(f"[KG-WorkerGuard] 任务 {task.id} ({task.task_name}) 已入队到 {provider}")
+                                else:
+                                    logger.warning(f"[KG-WorkerGuard] 任务 {task.id} 入队失败")
 
-                        except Exception as e:
-                            logger.error(f"[KG-WorkerGuard] 启动任务 {task.id} 失败: {e}")
+                            except Exception as e:
+                                logger.error(f"[KG-WorkerGuard] 启动任务 {task.id} 失败: {e}")
 
-                    if enqueued_count > 0:
-                        logger.info(f"[KG-WorkerGuard] 成功入队 {enqueued_count} 个任务")
+                        if enqueued_count > 0:
+                            logger.info(f"[KG-WorkerGuard] 成功入队 {enqueued_count} 个任务")
 
-                finally:
-                    session.close()
+                    except Exception as e:
+                        session.rollback()
+                        raise
 
             except Exception as e:
                 logger.error(f"[KG-WorkerGuard] 自动启动任务失败: {e}", exc_info=True)

@@ -164,75 +164,75 @@ class KnowledgeGraphExtractor:
         """从章节提取知识图谱数据"""
         try:
             # 获取章节数据
-            session = db_manager.get_session()
-            try:
-                chapter = session.query(Chapter).filter_by(id=chapter_id).first()
-                if not chapter:
-                    logger.error(f"章节不存在: {chapter_id}")
-                    return [], []
+            with db_manager.get_session() as session:
+                try:
+                    chapter = session.query(Chapter).filter_by(id=chapter_id).first()
+                    if not chapter:
+                        logger.error(f"章节不存在: {chapter_id}")
+                        return [], []
 
-                logger.info(f"开始提取章节知识图谱: {chapter.title}")
+                    logger.info(f"开始提取章节知识图谱: {chapter.title}")
 
-                # 检查章节内容是否为空或过短
-                if not chapter.content or len(chapter.content.strip()) < 10:
-                    logger.warning(f"章节内容为空或过短，跳过提取: {chapter.title}")
-                    return [], []
+                    # 检查章节内容是否为空或过短
+                    if not chapter.content or len(chapter.content.strip()) < 10:
+                        logger.warning(f"章节内容为空或过短，跳过提取: {chapter.title}")
+                        return [], []
 
-                # 获取配置
-                from ..services.kg_config_service import kg_config_service
-                config = None
-                if config_id:
-                    config = kg_config_service.get_config_by_id(config_id)
-                if not config:
-                    config = kg_config_service.get_default_config()
+                    # 获取配置
+                    from ..services.kg_config_service import kg_config_service
+                    config = None
+                    if config_id:
+                        config = kg_config_service.get_config_by_id(config_id)
+                    if not config:
+                        config = kg_config_service.get_default_config()
 
-                entities = []
-                relations = []
+                    entities = []
+                    relations = []
 
-                if use_ai and self.ai_manager:
-                    # 若Provider暂停，立刻中断，交由上层处理（避免将章节误标为失败）
-                    try:
-                        from ..services.kg_config_service import kg_config_service
-                        ai_cfg_check = kg_config_service.get_ai_config(config)
-                        from ..services.ai_provider_throttle import is_suspended as _is_suspended
-                        if ai_cfg_check.get('provider_name') and _is_suspended(ai_cfg_check.get('provider_name')):
-                            logger.warning(f"Provider 暂停中，跳过章节提取: provider={ai_cfg_check.get('provider_name')}, chapter_id={chapter_id}")
-                            # 通过抛出特定异常通知上层逻辑暂停任务并回退章节状态
-                            raise RuntimeError('provider_suspended')
-                    except RuntimeError:
-                        raise
-                    except Exception:
-                        # 覆盖失败时不影响正常流程
-                        pass
-                    # 使用AI提取
-                    # 若模型未配置，尝试用provider的第一个模型作为默认模型
-                    try:
-                        from ..services.kg_config_service import kg_config_service
-                        ai_cfg = kg_config_service.get_ai_config(config)
-                        if not ai_cfg.get('model_name'):
-                            from src.services.database_service import db_service
-                            provider = db_service.get_ai_provider_by_name(ai_cfg.get('provider_name'))
-                            if provider and provider.models:
-                                # 动态为当前提取过程指定默认模型
-                                config.ai_model = provider.models[0]
-                    except Exception:
-                        pass
+                    if use_ai and self.ai_manager:
+                        # 若Provider暂停，立刻中断，交由上层处理（避免将章节误标为失败）
+                        try:
+                            from ..services.kg_config_service import kg_config_service
+                            ai_cfg_check = kg_config_service.get_ai_config(config)
+                            from ..services.ai_provider_throttle import is_suspended as _is_suspended
+                            if ai_cfg_check.get('provider_name') and _is_suspended(ai_cfg_check.get('provider_name')):
+                                logger.warning(f"Provider 暂停中，跳过章节提取: provider={ai_cfg_check.get('provider_name')}, chapter_id={chapter_id}")
+                                # 通过抛出特定异常通知上层逻辑暂停任务并回退章节状态
+                                raise RuntimeError('provider_suspended')
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            # 覆盖失败时不影响正常流程
+                            pass
+                        # 使用AI提取
+                        # 若模型未配置，尝试用provider的第一个模型作为默认模型
+                        try:
+                            from ..services.kg_config_service import kg_config_service
+                            ai_cfg = kg_config_service.get_ai_config(config)
+                            if not ai_cfg.get('model_name'):
+                                from src.services.database_service import db_service
+                                provider = db_service.get_ai_provider_by_name(ai_cfg.get('provider_name'))
+                                if provider and provider.models:
+                                    # 动态为当前提取过程指定默认模型
+                                    config.ai_model = provider.models[0]
+                        except Exception:
+                            pass
 
-                    ai_entities, ai_relations = self._extract_with_ai(chapter, config)
-                    entities.extend(ai_entities)
-                    relations.extend(ai_relations)
-                    # 注意：不再回退到规则提取。AI为空即视为失败，由上层处理失败逻辑。
-                else:
-                    # 使用规则提取
-                    rule_entities, rule_relations = self._extract_with_rules(chapter, config)
-                    entities.extend(rule_entities)
-                    relations.extend(rule_relations)
+                        ai_entities, ai_relations = self._extract_with_ai(chapter, config)
+                        entities.extend(ai_entities)
+                        relations.extend(ai_relations)
+                        # 注意：不再回退到规则提取。AI为空即视为失败，由上层处理失败逻辑。
+                    else:
+                        # 使用规则提取
+                        rule_entities, rule_relations = self._extract_with_rules(chapter, config)
+                        entities.extend(rule_entities)
+                        relations.extend(rule_relations)
 
-                logger.info(f"提取完成 - 实体: {len(entities)}, 关系: {len(relations)}")
-                return entities, relations
-
-            finally:
-                session.close()
+                    logger.info(f"提取完成 - 实体: {len(entities)}, 关系: {len(relations)}")
+                    return entities, relations
+                except Exception as e:
+                    session.rollback()
+                    raise
 
         except Exception as e:
             # 对 Provider 暂停的情况，向上抛出，交由上层处理（不要在这里吞掉）
@@ -613,175 +613,176 @@ class KnowledgeGraphExtractor:
             novel_id = task_info['novel_id']
             use_ai = task_info['use_ai']
 
-            session = db_manager.get_session()
-            try:
-                # 获取小说信息
-                novel = session.query(Novel).filter_by(id=novel_id).first()
-                if not novel:
-                    logger.error(f"小说不存在: {novel_id}")
-                    kg_task_service.update_task_status(task_id, 'failed')
-                    return False
+            with db_manager.get_session() as session:
+                try:
+                    # 获取小说信息
+                    novel = session.query(Novel).filter_by(id=novel_id).first()
+                    if not novel:
+                        logger.error(f"小说不存在: {novel_id}")
+                        kg_task_service.update_task_status(task_id, 'failed')
+                        return False
 
-                # 创建小说节点
-                kg_service.create_novel_node(novel.id, novel.title, novel.author)
+                    # 创建小说节点
+                    kg_service.create_novel_node(novel.id, novel.title, novel.author)
 
-                # 获取待处理的章节
-                chapters = session.query(Chapter).filter(
-                    Chapter.id.in_(pending_chapter_ids)
-                ).all()
+                    # 获取待处理的章节
+                    chapters = session.query(Chapter).filter(
+                        Chapter.id.in_(pending_chapter_ids)
+                    ).all()
 
-                # 分批处理章节
-                batch_size = 5  # 缩小批次，便于断点续传
-                total_entities = 0
-                total_relations = 0
+                    # 分批处理章节
+                    batch_size = 5  # 缩小批次，便于断点续传
+                    total_entities = 0
+                    total_relations = 0
 
-                for i, chapter in enumerate(chapters):
-                    # 检查任务状态，支持暂停
-                    current_task = kg_task_service.get_task(task_id)
-                    if current_task and current_task['status'] == 'paused':
-                        logger.info(f"任务 {task_id} 已暂停")
-                        return True
+                    for i, chapter in enumerate(chapters):
+                        # 检查任务状态，支持暂停
+                        current_task = kg_task_service.get_task(task_id)
+                        if current_task and current_task['status'] == 'paused':
+                            logger.info(f"任务 {task_id} 已暂停")
+                            return True
 
-                    try:
-                        logger.debug(f"开始处理章节 {i+1}/{len(chapters)} - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}), 标题: {chapter.title}")
-
-                        # 在切换章节前检查 Provider 是否暂停：若暂停则回退并中止任务
-                        if use_ai:
-                            try:
-                                from ..services.kg_config_service import kg_config_service
-                                ai_cfg_loop = kg_config_service.get_ai_config(None)
-                                from ..services.ai_provider_throttle import is_suspended as _is_suspended
-                                if ai_cfg_loop.get('provider_name') and _is_suspended(ai_cfg_loop.get('provider_name')):
-                                    logger.warning(f"Provider 暂停中，暂停任务 {task_id}，保留未处理章节: provider={ai_cfg_loop.get('provider_name')}")
-                                    # 不更新章节为running，直接将任务置为paused并退出
-                                    kg_task_service.update_task_status(task_id, 'paused')
-                                    return True
-                            except Exception:
-                                pass
-
-                        # 更新当前处理章节
-                        kg_task_service.update_chapter_status(task_id, chapter.id, 'running')
-                        logger.debug(f"小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 状态已更新为 running")
-
-                        # 创建章节节点
-                        kg_service.create_chapter_node(
-                            chapter.id, chapter.title, novel.id,
-                            task_id=task_id,
-                            chapter_number=chapter.chapter_number,
-                            word_count=chapter.word_count,
-                            content=chapter.content
-                        )
-
-                        # 提取实体和关系
                         try:
-                            entities, relations = self.extract_from_chapter(chapter.id, use_ai)
-                        except Exception as e:
-                            if 'provider_suspended' in str(e):
-                                # 回退章节状态为pending，不计入失败；暂停任务等待恢复
+                            logger.debug(f"开始处理章节 {i+1}/{len(chapters)} - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}), 标题: {chapter.title}")
+
+                            # 在切换章节前检查 Provider 是否暂停：若暂停则回退并中止任务
+                            if use_ai:
                                 try:
-                                    kg_task_service.update_chapter_status(task_id, chapter.id, 'pending')
+                                    from ..services.kg_config_service import kg_config_service
+                                    ai_cfg_loop = kg_config_service.get_ai_config(None)
+                                    from ..services.ai_provider_throttle import is_suspended as _is_suspended
+                                    if ai_cfg_loop.get('provider_name') and _is_suspended(ai_cfg_loop.get('provider_name')):
+                                        logger.warning(f"Provider 暂停中，暂停任务 {task_id}，保留未处理章节: provider={ai_cfg_loop.get('provider_name')}")
+                                        # 不更新章节为running，直接将任务置为paused并退出
+                                        kg_task_service.update_task_status(task_id, 'paused')
+                                        return True
                                 except Exception:
                                     pass
-                                kg_task_service.update_task_status(task_id, 'paused')
-                                logger.info(f"Provider 暂停，已回退章节状态并暂停任务: task={task_id}, chapter_id={chapter.id}")
-                                return True
-                            else:
-                                raise
 
-                        # 若启用AI且无任何提取结果，则视为AI提取失败，不进行规则回退
-                        if use_ai and (not entities and not relations):
-                            logger.warning(
-                                f"AI提取结果为空，标记章节失败（不回退规则） - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id})"
+                            # 更新当前处理章节
+                            kg_task_service.update_chapter_status(task_id, chapter.id, 'running')
+                            logger.debug(f"小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 状态已更新为 running")
+
+                            # 创建章节节点
+                            kg_service.create_chapter_node(
+                                chapter.id, chapter.title, novel.id,
+                                task_id=task_id,
+                                chapter_number=chapter.chapter_number,
+                                word_count=chapter.word_count,
+                                content=chapter.content
                             )
-                            try:
-                                from ..services.ai_provider_throttle import increment_failure
-                                from ..services.kg_config_service import kg_config_service
-                                # 尝试获取当前配置的服务商名称并记录失败
-                                ai_cfg = kg_config_service.get_ai_config(None)
-                                provider_name = ai_cfg.get('provider_name') if ai_cfg else None
-                                if provider_name:
-                                    increment_failure(provider_name)
-                            except Exception:
-                                pass
 
+                            # 提取实体和关系
+                            try:
+                                entities, relations = self.extract_from_chapter(chapter.id, use_ai)
+                            except Exception as e:
+                                if 'provider_suspended' in str(e):
+                                    # 回退章节状态为pending，不计入失败；暂停任务等待恢复
+                                    try:
+                                        kg_task_service.update_chapter_status(task_id, chapter.id, 'pending')
+                                    except Exception:
+                                        pass
+                                    kg_task_service.update_task_status(task_id, 'paused')
+                                    logger.info(f"Provider 暂停，已回退章节状态并暂停任务: task={task_id}, chapter_id={chapter.id}")
+                                    return True
+                                else:
+                                    raise
+
+                            # 若启用AI且无任何提取结果，则视为AI提取失败，不进行规则回退
+                            if use_ai and (not entities and not relations):
+                                logger.warning(
+                                    f"AI提取结果为空，标记章节失败（不回退规则） - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id})"
+                                )
+                                try:
+                                    from ..services.ai_provider_throttle import increment_failure
+                                    from ..services.kg_config_service import kg_config_service
+                                    # 尝试获取当前配置的服务商名称并记录失败
+                                    ai_cfg = kg_config_service.get_ai_config(None)
+                                    provider_name = ai_cfg.get('provider_name') if ai_cfg else None
+                                    if provider_name:
+                                        increment_failure(provider_name)
+                                except Exception:
+                                    pass
+
+                                kg_task_service.update_chapter_status(
+                                    task_id, chapter.id, 'failed', 'AI提取结果为空（已按失败处理）'
+                                )
+                                continue
+
+                            # 尝试创建实体和关系（可能失败）
+                            neo4j_success = False
+                            chapter_entities = 0
+                            chapter_relations = 0
+
+                            try:
+                                chapter_entities, chapter_relations = self._create_entities_and_relations(
+                                    entities, relations, kg_service, task_id
+                                )
+                                neo4j_success = True
+                                total_entities += chapter_entities
+                                total_relations += chapter_relations
+                                logger.debug(f"Neo4j数据创建成功: 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 实体: {chapter_entities}, 关系: {chapter_relations}")
+
+                            except Exception as neo4j_e:
+                                logger.error(f"Neo4j数据创建失败: 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 错误: {neo4j_e}")
+                                neo4j_success = False
+
+                            # 使用事务安全方法处理章节完成状态
+                            status_updated = kg_task_service.process_chapter_with_transaction_safety(
+                                task_id, chapter.id, chapter_entities, chapter_relations, neo4j_success
+                            )
+
+                            if status_updated:
+                                if neo4j_success:
+                                    logger.debug(f"✓ 章节处理完成 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 实体: {chapter_entities}, 关系: {chapter_relations}")
+                                else:
+                                    logger.warning(f"✗ 章节Neo4j处理失败 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 已标记为失败状态")
+
+                                # 发送WebSocket进度更新事件
+                                try:
+                                    logger.debug(f"准备推送任务进度到Redis: 任务{task_id}")
+                                    self._send_progress_update(task_id, task_info)
+                                except Exception as e:
+                                    logger.error(f"发送进度更新事件失败: {e}", exc_info=True)
+
+                            else:
+                                logger.error(f"✗ 章节状态更新失败 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}")
+                                # 即使状态更新失败，也继续处理下一个章节
+
+                        except Exception as e:
+                            logger.error(f"✗ 处理章节异常 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 错误: {e}")
                             kg_task_service.update_chapter_status(
-                                task_id, chapter.id, 'failed', 'AI提取结果为空（已按失败处理）'
+                                task_id, chapter.id, 'failed', str(e)
                             )
                             continue
 
-                        # 尝试创建实体和关系（可能失败）
-                        neo4j_success = False
-                        chapter_entities = 0
-                        chapter_relations = 0
+                        # 每处理5个章节进行一次垃圾回收
+                        if (i + 1) % batch_size == 0:
+                            gc.collect()
+                            logger.info(f"小说: {novel.title} 已处理 {i+1} 个章节")
 
-                        try:
-                            chapter_entities, chapter_relations = self._create_entities_and_relations(
-                                entities, relations, kg_service, task_id
+                    # 检查是否所有章节都处理完成
+                    remaining_pending = kg_task_service.get_pending_chapters(task_id)
+                    if not remaining_pending:
+                        # 检查是否真正完成（所有章节都成功）
+                        if kg_task_service.is_task_fully_completed(task_id):
+                            kg_task_service.update_task_status(
+                                task_id, 'completed', total_entities, total_relations
                             )
-                            neo4j_success = True
-                            total_entities += chapter_entities
-                            total_relations += chapter_relations
-                            logger.debug(f"Neo4j数据创建成功: 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 实体: {chapter_entities}, 关系: {chapter_relations}")
-
-                        except Exception as neo4j_e:
-                            logger.error(f"Neo4j数据创建失败: 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 错误: {neo4j_e}")
-                            neo4j_success = False
-
-                        # 使用事务安全方法处理章节完成状态
-                        status_updated = kg_task_service.process_chapter_with_transaction_safety(
-                            task_id, chapter.id, chapter_entities, chapter_relations, neo4j_success
-                        )
-
-                        if status_updated:
-                            if neo4j_success:
-                                logger.debug(f"✓ 章节处理完成 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 实体: {chapter_entities}, 关系: {chapter_relations}")
-                            else:
-                                logger.warning(f"✗ 章节Neo4j处理失败 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 已标记为失败状态")
-
-                            # 发送WebSocket进度更新事件
-                            try:
-                                logger.debug(f"准备推送任务进度到Redis: 任务{task_id}")
-                                self._send_progress_update(task_id, task_info)
-                            except Exception as e:
-                                logger.error(f"发送进度更新事件失败: {e}", exc_info=True)
-
+                            logger.info(f"任务 {task_id} 完成，总实体: {total_entities}, 总关系: {total_relations}")
                         else:
-                            logger.error(f"✗ 章节状态更新失败 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}")
-                            # 即使状态更新失败，也继续处理下一个章节
-
-                    except Exception as e:
-                        logger.error(f"✗ 处理章节异常 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 错误: {e}")
-                        kg_task_service.update_chapter_status(
-                            task_id, chapter.id, 'failed', str(e)
-                        )
-                        continue
-
-                    # 每处理5个章节进行一次垃圾回收
-                    if (i + 1) % batch_size == 0:
-                        gc.collect()
-                        logger.info(f"小说: {novel.title} 已处理 {i+1} 个章节")
-
-                # 检查是否所有章节都处理完成
-                remaining_pending = kg_task_service.get_pending_chapters(task_id)
-                if not remaining_pending:
-                    # 检查是否真正完成（所有章节都成功）
-                    if kg_task_service.is_task_fully_completed(task_id):
-                        kg_task_service.update_task_status(
-                            task_id, 'completed', total_entities, total_relations
-                        )
-                        logger.info(f"任务 {task_id} 完成，总实体: {total_entities}, 总关系: {total_relations}")
+                            # 有失败的章节，标记任务为失败
+                            completion_status = kg_task_service.get_task_completion_status(task_id)
+                            kg_task_service.update_task_status(task_id, 'failed')
+                            logger.warning(f"任务 {task_id} 标记为失败：章节完成情况 {completion_status}")
                     else:
-                        # 有失败的章节，标记任务为失败
-                        completion_status = kg_task_service.get_task_completion_status(task_id)
-                        kg_task_service.update_task_status(task_id, 'failed')
-                        logger.warning(f"任务 {task_id} 标记为失败：章节完成情况 {completion_status}")
-                else:
-                    logger.warning(f"任务 {task_id} 仍有 {len(remaining_pending)} 个章节待处理")
+                        logger.warning(f"任务 {task_id} 仍有 {len(remaining_pending)} 个章节待处理")
 
-                return True
+                    return True
 
-            finally:
-                session.close()
+                except Exception as e:
+                    session.rollback()
+                    raise
 
         except Exception as e:
             logger.error(f"构建知识图谱任务失败: {e}")
@@ -913,147 +914,148 @@ class KnowledgeGraphExtractor:
                 logger.error(f"知识图谱服务初始化失败: {e}")
                 return False
 
-            session = db_manager.get_session()
-            try:
-                # 获取小说信息
-                novel = session.query(Novel).filter_by(id=novel_id).first()
-                if not novel:
-                    logger.error(f"小说不存在: {novel_id}")
-                    return False
+            with db_manager.get_session() as session:
+                try:
+                    # 获取小说信息
+                    novel = session.query(Novel).filter_by(id=novel_id).first()
+                    if not novel:
+                        logger.error(f"小说不存在: {novel_id}")
+                        return False
 
-                # 创建小说节点
-                kg_service.create_novel_node(novel.id, novel.title, novel.author)
+                    # 创建小说节点
+                    kg_service.create_novel_node(novel.id, novel.title, novel.author)
 
-                # 获取要处理的章节
-                if chapter_ids:
-                    chapters = session.query(Chapter).filter(
-                        Chapter.novel_id == novel_id,
-                        Chapter.id.in_(chapter_ids)
-                    ).all()
-                else:
-                    chapters = session.query(Chapter).filter_by(novel_id=novel_id).all()
+                    # 获取要处理的章节
+                    if chapter_ids:
+                        chapters = session.query(Chapter).filter(
+                            Chapter.novel_id == novel_id,
+                            Chapter.id.in_(chapter_ids)
+                        ).all()
+                    else:
+                        chapters = session.query(Chapter).filter_by(novel_id=novel_id).all()
 
-                logger.info(f"开始构建知识图谱，小说: {novel.title}, 章节数: {len(chapters)}")
+                    logger.info(f"开始构建知识图谱，小说: {novel.title}, 章节数: {len(chapters)}")
 
-                # 存储所有提取的实体和关系
-                all_entities = []
-                all_relations = []
+                    # 存储所有提取的实体和关系
+                    all_entities = []
+                    all_relations = []
 
-                # 分批处理章节，避免内存问题
-                batch_size = 10  # 每批处理10个章节
-                total_batches = (len(chapters) + batch_size - 1) // batch_size
+                    # 分批处理章节，避免内存问题
+                    batch_size = 10  # 每批处理10个章节
+                    total_batches = (len(chapters) + batch_size - 1) // batch_size
 
-                for batch_idx in range(0, len(chapters), batch_size):
-                    batch_chapters = chapters[batch_idx:batch_idx + batch_size]
-                    current_batch = batch_idx // batch_size + 1
-                    logger.info(f"处理第 {current_batch}/{total_batches} 批章节 ({len(batch_chapters)}个)")
+                    for batch_idx in range(0, len(chapters), batch_size):
+                        batch_chapters = chapters[batch_idx:batch_idx + batch_size]
+                        current_batch = batch_idx // batch_size + 1
+                        logger.info(f"处理第 {current_batch}/{total_batches} 批章节 ({len(batch_chapters)}个)")
 
-                    # 逐章节提取
-                    for chapter in batch_chapters:
-                        # 创建章节节点
-                        kg_service.create_chapter_node(
-                            chapter.id,
-                            chapter.title,
-                            novel.id,
-                            chapter_number=chapter.chapter_number,
-                            word_count=chapter.word_count,
-                            content=chapter.content
-                        )
+                        # 逐章节提取
+                        for chapter in batch_chapters:
+                            # 创建章节节点
+                            kg_service.create_chapter_node(
+                                chapter.id,
+                                chapter.title,
+                                novel.id,
+                                chapter_number=chapter.chapter_number,
+                                word_count=chapter.word_count,
+                                content=chapter.content
+                            )
 
-                        # 提取实体和关系
-                        entities, relations = self.extract_from_chapter(chapter.id, use_ai)
-                        all_entities.extend(entities)
-                        all_relations.extend(relations)
+                            # 提取实体和关系
+                            entities, relations = self.extract_from_chapter(chapter.id, use_ai)
+                            all_entities.extend(entities)
+                            all_relations.extend(relations)
 
-                    # 批次间强制垃圾回收，释放内存
-                    gc.collect()
-                    logger.info(f"第 {current_batch} 批处理完成，已处理 {len(all_entities)} 个实体")
+                        # 批次间强制垃圾回收，释放内存
+                        gc.collect()
+                        logger.info(f"第 {current_batch} 批处理完成，已处理 {len(all_entities)} 个实体")
 
-                # 创建实体节点并建立基础关系
-                entity_stats = {'character': 0, 'location': 0, 'organization': 0, 'event': 0}
-                character_chapter_map = {}  # 记录人物在哪些章节出现
+                    # 创建实体节点并建立基础关系
+                    entity_stats = {'character': 0, 'location': 0, 'organization': 0, 'event': 0}
+                    character_chapter_map = {}  # 记录人物在哪些章节出现
 
-                for entity in all_entities:
-                    try:
-                        if entity.entity_type == 'character':
-                            kg_service.create_character(entity.name, entity.novel_id, **entity.properties)
-                            entity_stats['character'] += 1
-
-                            # 记录人物出现的章节
-                            if entity.name not in character_chapter_map:
-                                character_chapter_map[entity.name] = set()
-                            character_chapter_map[entity.name].add(entity.chapter_id)
-
-                        elif entity.entity_type == 'location':
-                            kg_service.create_location(entity.name, entity.novel_id, **entity.properties)
-                            entity_stats['location'] += 1
-                        elif entity.entity_type == 'organization':
-                            kg_service.create_organization(entity.name, entity.novel_id, **entity.properties)
-                            entity_stats['organization'] += 1
-                        elif entity.entity_type == 'event':
-                            # 使用更稳定的ID生成方式
-                            name_hash = hashlib.md5(entity.name.encode('utf-8')).hexdigest()[:8]
-                            event_id = f"{entity.novel_id}_{entity.chapter_id}_{name_hash}"
-                            kg_service.create_event(event_id, entity.name, entity.chapter_id, entity.novel_id, **entity.properties)
-                            entity_stats['event'] += 1
-                    except Exception as e:
-                        logger.error(f"创建实体失败: {entity.name}, 错误: {e}")
-
-                # 创建人物出现在章节的关系
-                for character_name, chapter_ids in character_chapter_map.items():
-                    for chapter_id in chapter_ids:
+                    for entity in all_entities:
                         try:
-                            kg_service.character_appears_in_chapter(character_name, chapter_id, novel_id)
+                            if entity.entity_type == 'character':
+                                kg_service.create_character(entity.name, entity.novel_id, **entity.properties)
+                                entity_stats['character'] += 1
+
+                                # 记录人物出现的章节
+                                if entity.name not in character_chapter_map:
+                                    character_chapter_map[entity.name] = set()
+                                character_chapter_map[entity.name].add(entity.chapter_id)
+
+                            elif entity.entity_type == 'location':
+                                kg_service.create_location(entity.name, entity.novel_id, **entity.properties)
+                                entity_stats['location'] += 1
+                            elif entity.entity_type == 'organization':
+                                kg_service.create_organization(entity.name, entity.novel_id, **entity.properties)
+                                entity_stats['organization'] += 1
+                            elif entity.entity_type == 'event':
+                                # 使用更稳定的ID生成方式
+                                name_hash = hashlib.md5(entity.name.encode('utf-8')).hexdigest()[:8]
+                                event_id = f"{entity.novel_id}_{entity.chapter_id}_{name_hash}"
+                                kg_service.create_event(event_id, entity.name, entity.chapter_id, entity.novel_id, **entity.properties)
+                                entity_stats['event'] += 1
                         except Exception as e:
-                            logger.error(f"创建人物章节关系失败: {character_name} -> 章节ID {chapter_id}, 错误: {e}")
+                            logger.error(f"创建实体失败: {entity.name}, 错误: {e}")
 
-                # 创建关系
-                relation_stats = {}
-                for relation in all_relations:
-                    try:
-                        relation_type = relation.relation_type
+                    # 创建人物出现在章节的关系
+                    for character_name, chapter_ids in character_chapter_map.items():
+                        for chapter_id in chapter_ids:
+                            try:
+                                kg_service.character_appears_in_chapter(character_name, chapter_id, novel_id)
+                            except Exception as e:
+                                logger.error(f"创建人物章节关系失败: {character_name} -> 章节ID {chapter_id}, 错误: {e}")
 
-                        if relation_type in ['FRIEND', 'ENEMY', 'LOVES', 'HATES', 'KNOWS', 'LEADS', 'FOLLOWS']:
-                            # 人物关系
-                            kg_service.character_relationship(
-                                relation.from_entity,
-                                relation.to_entity,
-                                relation_type,
-                                relation.novel_id,
-                                **relation.properties
-                            )
-                        elif relation_type == 'PARTICIPATES_IN':
-                            # 人物参与事件
-                            name_hash = hashlib.md5(relation.to_entity.encode('utf-8')).hexdigest()[:8]
-                            event_id = f"{relation.novel_id}_{relation.chapter_id}_{name_hash}"
-                            kg_service.character_participates_in_event(
-                                relation.from_entity,
-                                event_id,
-                                relation.novel_id,
-                                **relation.properties
-                            )
-                        elif relation_type == 'OCCURS_IN':
-                            # 事件发生在地点
-                            name_hash = hashlib.md5(relation.from_entity.encode('utf-8')).hexdigest()[:8]
-                            event_id = f"{relation.novel_id}_{relation.chapter_id}_{name_hash}"
-                            kg_service.event_occurs_in_location(
-                                event_id,
-                                relation.to_entity,
-                                relation.novel_id,
-                                **relation.properties
-                            )
+                    # 创建关系
+                    relation_stats = {}
+                    for relation in all_relations:
+                        try:
+                            relation_type = relation.relation_type
 
-                        relation_stats[relation_type] = relation_stats.get(relation_type, 0) + 1
-                    except Exception as e:
-                        logger.error(f"创建关系失败: {relation.from_entity} -> {relation.to_entity}, 错误: {e}")
+                            if relation_type in ['FRIEND', 'ENEMY', 'LOVES', 'HATES', 'KNOWS', 'LEADS', 'FOLLOWS']:
+                                # 人物关系
+                                kg_service.character_relationship(
+                                    relation.from_entity,
+                                    relation.to_entity,
+                                    relation_type,
+                                    relation.novel_id,
+                                    **relation.properties
+                                )
+                            elif relation_type == 'PARTICIPATES_IN':
+                                # 人物参与事件
+                                name_hash = hashlib.md5(relation.to_entity.encode('utf-8')).hexdigest()[:8]
+                                event_id = f"{relation.novel_id}_{relation.chapter_id}_{name_hash}"
+                                kg_service.character_participates_in_event(
+                                    relation.from_entity,
+                                    event_id,
+                                    relation.novel_id,
+                                    **relation.properties
+                                )
+                            elif relation_type == 'OCCURS_IN':
+                                # 事件发生在地点
+                                name_hash = hashlib.md5(relation.from_entity.encode('utf-8')).hexdigest()[:8]
+                                event_id = f"{relation.novel_id}_{relation.chapter_id}_{name_hash}"
+                                kg_service.event_occurs_in_location(
+                                    event_id,
+                                    relation.to_entity,
+                                    relation.novel_id,
+                                    **relation.properties
+                                )
 
-                logger.info(f"知识图谱构建完成")
-                logger.info(f"实体统计: {entity_stats}")
-                logger.info(f"关系统计: {relation_stats}")
-                return True
+                            relation_stats[relation_type] = relation_stats.get(relation_type, 0) + 1
+                        except Exception as e:
+                            logger.error(f"创建关系失败: {relation.from_entity} -> {relation.to_entity}, 错误: {e}")
 
-            finally:
-                session.close()
+                    logger.info(f"知识图谱构建完成")
+                    logger.info(f"实体统计: {entity_stats}")
+                    logger.info(f"关系统计: {relation_stats}")
+                    return True
+
+                except Exception as e:
+                    session.rollback()
+                    raise
 
         except Exception as e:
             logger.error(f"构建知识图谱失败: {e}")

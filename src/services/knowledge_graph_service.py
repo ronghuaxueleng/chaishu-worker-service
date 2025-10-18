@@ -213,18 +213,17 @@ class KnowledgeGraphService:
 
             # 先从数据库查询章节号
             chapter_number = None
-            db_session = db_manager.get_session()
-            try:
-                result = db_session.execute(
-                    sql_text("SELECT chapter_number FROM chapters WHERE id = :chapter_id"),
-                    {"chapter_id": chapter_id}
-                ).fetchone()
-                if result:
-                    chapter_number = result[0]
-            except Exception as e:
-                logger.warning(f"查询章节号失败 (chapter_id={chapter_id}): {e}")
-            finally:
-                db_session.close()
+            with db_manager.get_session() as db_session:
+                try:
+                    result = db_session.execute(
+                        sql_text("SELECT chapter_number FROM chapters WHERE id = :chapter_id"),
+                        {"chapter_id": chapter_id}
+                    ).fetchone()
+                    if result:
+                        chapter_number = result[0]
+                except Exception as e:
+                    db_session.rollback()
+                    logger.warning(f"查询章节号失败 (chapter_id={chapter_id}): {e}")
 
             query = """
             MERGE (e:Event {id: $event_id})

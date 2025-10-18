@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, B
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone, timedelta
+from contextlib import closing
 import os
 import json
 import base64
@@ -829,113 +830,113 @@ class DatabaseManager:
             return False
     
     def init_default_data(self):
-        session = self.get_session()
-        try:
-            # 创建默认AI服务商
-            if not session.query(AIProvider).filter_by(name='openai').first():
-                openai_provider = AIProvider(
-                    name='openai',
-                    display_name='OpenAI',
-                    base_url='https://api.openai.com/v1',
-                    models=['gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
-                    is_active=True
-                )
-                session.add(openai_provider)
-            
-            if not session.query(AIProvider).filter_by(name='claude').first():
-                claude_provider = AIProvider(
-                    name='claude',
-                    display_name='Claude',
-                    base_url='https://api.anthropic.com/v1',
-                    models=['claude-3-opus', 'claude-3-sonnet', 'claude-3-haiku'],
-                    is_active=True
-                )
-                session.add(claude_provider)
-            
-            if not session.query(AIProvider).filter_by(name='zhipu').first():
-                zhipu_provider = AIProvider(
-                    name='zhipu',
-                    display_name='智谱AI',
-                    base_url='https://open.bigmodel.cn/api/paas/v4',
-                    models=['glm-4', 'glm-4v', 'glm-3-turbo'],
-                    is_active=True
-                )
-                session.add(zhipu_provider)
-            
-            if not session.query(AIProvider).filter_by(name='deepseek').first():
-                deepseek_provider = AIProvider(
-                    name='deepseek',
-                    display_name='DeepSeek',
-                    base_url='https://api.deepseek.com/v1',
-                    models=['deepseek-chat', 'deepseek-coder'],
-                    is_active=True
-                )
-                session.add(deepseek_provider)
-            
-            # 添加本地AI服务商
-            if not session.query(AIProvider).filter_by(name='ollama').first():
-                ollama_provider = AIProvider(
-                    name='ollama',
-                    display_name='Ollama (本地)',
-                    base_url='http://localhost:11434',
-                    models=['llama2', 'codellama', 'qwen', 'chatglm3'],  # 常见模型示例
-                    is_active=False  # 默认不激活，需要用户配置
-                )
-                session.add(ollama_provider)
-            
-            if not session.query(AIProvider).filter_by(name='localai').first():
-                localai_provider = AIProvider(
-                    name='localai',
-                    display_name='LocalAI (本地)',
-                    base_url='http://localhost:8080',
-                    models=['gpt-3.5-turbo', 'gpt-4'],  # 兼容模型名
-                    is_active=False  # 默认不激活，需要用户配置
-                )
-                session.add(localai_provider)
-            
-            if not session.query(AIProvider).filter_by(name='openai-compatible').first():
-                openai_compatible_provider = AIProvider(
-                    name='openai-compatible',
-                    display_name='OpenAI兼容服务 (本地)',
-                    base_url='http://localhost:8000',
-                    models=['gpt-3.5-turbo', 'gpt-4'],  # 兼容模型名
-                    is_active=False  # 默认不激活，需要用户配置
-                )
-                session.add(openai_compatible_provider)
-            
-            # 创建默认分类的占位符模板（确保默认分类存在）
-            if not session.query(PromptTemplate).filter_by(name='_category_placeholder_默认').first():
-                default_category_placeholder = PromptTemplate(
-                    name='_category_placeholder_默认',
-                    category='默认',
-                    description='系统默认分类占位符，请勿删除',
-                    template='# 这是默认分类的占位符模板\n# 用于在系统中建立默认分类: {category_name}',
-                    variables=['category_name'],
-                    is_default=False,
-                    is_system_category=True  # 标记为系统分类
-                )
-                session.add(default_category_placeholder)
-            
-            # 创建拆书流程分类的占位符模板
-            if not session.query(PromptTemplate).filter_by(name='_category_placeholder_拆书流程').first():
-                chaishu_category_placeholder = PromptTemplate(
-                    name='_category_placeholder_拆书流程',
-                    category='拆书流程',
-                    description='拆书流程分类占位符，请勿删除',
-                    template='# 这是拆书流程分类的占位符模板\n# 用于在系统中建立拆书流程分类: {category_name}',
-                    variables=['category_name'],
-                    is_default=False,
-                    is_system_category=True  # 标记为系统分类
-                )
-                session.add(chaishu_category_placeholder)
-            
-            # 创建默认提示词模板（全部放在默认分类中）
-            default_templates = [
-                {
-                    'name': '剧情摘要',
-                    'category': '默认',
-                    'description': '提取章节核心剧情和关键事件',
-                    'template': '''请对以下小说章节进行剧情摘要分析：
+        with closing(self.get_session()) as session:
+            try:
+                # 创建默认AI服务商
+                if not session.query(AIProvider).filter_by(name='openai').first():
+                    openai_provider = AIProvider(
+                        name='openai',
+                        display_name='OpenAI',
+                        base_url='https://api.openai.com/v1',
+                        models=['gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+                        is_active=True
+                    )
+                    session.add(openai_provider)
+
+                if not session.query(AIProvider).filter_by(name='claude').first():
+                    claude_provider = AIProvider(
+                        name='claude',
+                        display_name='Claude',
+                        base_url='https://api.anthropic.com/v1',
+                        models=['claude-3-opus', 'claude-3-sonnet', 'claude-3-haiku'],
+                        is_active=True
+                    )
+                    session.add(claude_provider)
+
+                if not session.query(AIProvider).filter_by(name='zhipu').first():
+                    zhipu_provider = AIProvider(
+                        name='zhipu',
+                        display_name='智谱AI',
+                        base_url='https://open.bigmodel.cn/api/paas/v4',
+                        models=['glm-4', 'glm-4v', 'glm-3-turbo'],
+                        is_active=True
+                    )
+                    session.add(zhipu_provider)
+
+                if not session.query(AIProvider).filter_by(name='deepseek').first():
+                    deepseek_provider = AIProvider(
+                        name='deepseek',
+                        display_name='DeepSeek',
+                        base_url='https://api.deepseek.com/v1',
+                        models=['deepseek-chat', 'deepseek-coder'],
+                        is_active=True
+                    )
+                    session.add(deepseek_provider)
+
+                # 添加本地AI服务商
+                if not session.query(AIProvider).filter_by(name='ollama').first():
+                    ollama_provider = AIProvider(
+                        name='ollama',
+                        display_name='Ollama (本地)',
+                        base_url='http://localhost:11434',
+                        models=['llama2', 'codellama', 'qwen', 'chatglm3'],  # 常见模型示例
+                        is_active=False  # 默认不激活，需要用户配置
+                    )
+                    session.add(ollama_provider)
+
+                if not session.query(AIProvider).filter_by(name='localai').first():
+                    localai_provider = AIProvider(
+                        name='localai',
+                        display_name='LocalAI (本地)',
+                        base_url='http://localhost:8080',
+                        models=['gpt-3.5-turbo', 'gpt-4'],  # 兼容模型名
+                        is_active=False  # 默认不激活，需要用户配置
+                    )
+                    session.add(localai_provider)
+
+                if not session.query(AIProvider).filter_by(name='openai-compatible').first():
+                    openai_compatible_provider = AIProvider(
+                        name='openai-compatible',
+                        display_name='OpenAI兼容服务 (本地)',
+                        base_url='http://localhost:8000',
+                        models=['gpt-3.5-turbo', 'gpt-4'],  # 兼容模型名
+                        is_active=False  # 默认不激活，需要用户配置
+                    )
+                    session.add(openai_compatible_provider)
+
+                # 创建默认分类的占位符模板（确保默认分类存在）
+                if not session.query(PromptTemplate).filter_by(name='_category_placeholder_默认').first():
+                    default_category_placeholder = PromptTemplate(
+                        name='_category_placeholder_默认',
+                        category='默认',
+                        description='系统默认分类占位符，请勿删除',
+                        template='# 这是默认分类的占位符模板\n# 用于在系统中建立默认分类: {category_name}',
+                        variables=['category_name'],
+                        is_default=False,
+                        is_system_category=True  # 标记为系统分类
+                    )
+                    session.add(default_category_placeholder)
+
+                # 创建拆书流程分类的占位符模板
+                if not session.query(PromptTemplate).filter_by(name='_category_placeholder_拆书流程').first():
+                    chaishu_category_placeholder = PromptTemplate(
+                        name='_category_placeholder_拆书流程',
+                        category='拆书流程',
+                        description='拆书流程分类占位符，请勿删除',
+                        template='# 这是拆书流程分类的占位符模板\n# 用于在系统中建立拆书流程分类: {category_name}',
+                        variables=['category_name'],
+                        is_default=False,
+                        is_system_category=True  # 标记为系统分类
+                    )
+                    session.add(chaishu_category_placeholder)
+
+                # 创建默认提示词模板（全部放在默认分类中）
+                default_templates = [
+                    {
+                        'name': '剧情摘要',
+                        'category': '默认',
+                        'description': '提取章节核心剧情和关键事件',
+                        'template': '''请对以下小说章节进行剧情摘要分析：
 
 章节标题：{title}
 章节内容：{content}
@@ -947,14 +948,14 @@ class DatabaseManager:
 4. 情节转折（如果有的话）
 
 请确保摘要准确且简洁。''',
-                    'variables': ['title', 'content'],
-                    'is_default': True
-                },
-                {
-                    'name': '章节大纲',
-                    'category': '默认',
-                    'description': '分析章节结构和叙事节奏',
-                    'template': '''请对以下小说章节进行结构分析：
+                        'variables': ['title', 'content'],
+                        'is_default': True
+                    },
+                    {
+                        'name': '章节大纲',
+                        'category': '默认',
+                        'description': '分析章节结构和叙事节奏',
+                        'template': '''请对以下小说章节进行结构分析：
 
 章节标题：{title}
 章节内容：{content}
@@ -966,14 +967,14 @@ class DatabaseManager:
 4. 章节功能（在整体故事中的作用）
 
 请提供详细的分析。''',
-                    'variables': ['title', 'content'],
-                    'is_default': True
-                },
-                {
-                    'name': '角色分析',
-                    'category': '默认',
-                    'description': '分析章节中的人物关系和性格发展',
-                    'template': '''请对以下小说章节进行角色分析：
+                        'variables': ['title', 'content'],
+                        'is_default': True
+                    },
+                    {
+                        'name': '角色分析',
+                        'category': '默认',
+                        'description': '分析章节中的人物关系和性格发展',
+                        'template': '''请对以下小说章节进行角色分析：
 
 章节标题：{title}
 章节内容：{content}
@@ -985,14 +986,14 @@ class DatabaseManager:
 4. 角色发展（人物在本章的成长或变化）
 
 请深入分析人物的心理和动机。''',
-                    'variables': ['title', 'content'],
-                    'is_default': True
-                },
-                {
-                    'name': '主题分析',
-                    'category': '默认',
-                    'description': '分析章节的主题思想和文化内涵',
-                    'template': '''请对以下小说章节进行主题分析：
+                        'variables': ['title', 'content'],
+                        'is_default': True
+                    },
+                    {
+                        'name': '主题分析',
+                        'category': '默认',
+                        'description': '分析章节的主题思想和文化内涵',
+                        'template': '''请对以下小说章节进行主题分析：
 
 章节标题：{title}
 章节内容：{content}
@@ -1004,14 +1005,14 @@ class DatabaseManager:
 4. 深层含义（隐含的意义和象征）
 
 请提供深入的主题解读。''',
-                    'variables': ['title', 'content'],
-                    'is_default': True
-                },
-                {
-                    'name': '文风分析',
-                    'category': '默认',
-                    'description': '分析章节的语言风格和修辞手法',
-                    'template': '''请对以下小说章节进行文风分析：
+                        'variables': ['title', 'content'],
+                        'is_default': True
+                    },
+                    {
+                        'name': '文风分析',
+                        'category': '默认',
+                        'description': '分析章节的语言风格和修辞手法',
+                        'template': '''请对以下小说章节进行文风分析：
 
 章节标题：{title}
 章节内容：{content}
@@ -1023,15 +1024,15 @@ class DatabaseManager:
 4. 文字特色（作者的语言特点）
 
 请详细分析文学技法的运用。''',
-                    'variables': ['title', 'content'],
-                    'is_default': True
-                },
-                # 拆书流程专用模板
-                {
-                    'name': '提炼剧情',
-                    'category': '拆书流程',
-                    'description': '从小说正文中提炼出对应的剧情，用于后续的章节分析和大纲生成',
-                    'template': '''**System:**
+                        'variables': ['title', 'content'],
+                        'is_default': True
+                    },
+                    # 拆书流程专用模板
+                    {
+                        'name': '提炼剧情',
+                        'category': '拆书流程',
+                        'description': '从小说正文中提炼出对应的剧情，用于后续的章节分析和大纲生成',
+                        'template': '''**System:**
 你需要参考一段小说的正文，提炼出对应的剧情。
 
 在提炼剧情时，需要遵照以下原则：
@@ -1044,14 +1045,14 @@ class DatabaseManager:
 **User:**
 下面是一段正文，需要提炼出对应的剧情：
 {chapter_content}''',
-                    'variables': ['chapter_content'],
-                    'is_default': False
-                },
-                {
-                    'name': '提炼章节大纲',
-                    'category': '拆书流程',
-                    'description': '从章节剧情中提炼出章节大纲，关注事件脉络和关键转折点',
-                    'template': '''**System:**
+                        'variables': ['chapter_content'],
+                        'is_default': False
+                    },
+                    {
+                        'name': '提炼章节大纲',
+                        'category': '拆书流程',
+                        'description': '从章节剧情中提炼出章节大纲，关注事件脉络和关键转折点',
+                        'template': '''**System:**
 你需要参考一段小说的章节剧情，提炼出章节大纲。
 
 在提炼章节大纲时，需要遵照以下原则：
@@ -1063,14 +1064,14 @@ class DatabaseManager:
 **User:**
 下面是一段小说的章节剧情，需要提炼出章节大纲：
 {chapter_plot}''',
-                    'variables': ['chapter_plot'],
-                    'is_default': False
-                },
-                {
-                    'name': '提炼全书大纲',
-                    'category': '拆书流程',
-                    'description': '从所有章节内容中提炼出整本小说的大纲，关注整体故事脉络',
-                    'template': '''**System:**
+                        'variables': ['chapter_plot'],
+                        'is_default': False
+                    },
+                    {
+                        'name': '提炼全书大纲',
+                        'category': '拆书流程',
+                        'description': '从所有章节内容中提炼出整本小说的大纲，关注整体故事脉络',
+                        'template': '''**System:**
 你需要参考小说的章节，提炼出小说大纲。
 
 在提炼小说大纲时，需要遵照以下原则：
@@ -1081,112 +1082,110 @@ class DatabaseManager:
 **User:**
 下面是小说章节，需要提炼出小说大纲：
 {all_chapters}''',
-                    'variables': ['all_chapters'],
-                    'is_default': False
-                }
-            ]
-            
-            for template_data in default_templates:
-                if not session.query(PromptTemplate).filter_by(name=template_data['name']).first():
-                    template = PromptTemplate(**template_data)
-                    session.add(template)
-            
-            # 创建默认工作流
-            if not session.query(Workflow).filter_by(name='智能拆书专业流程').first():
-                workflow = Workflow(
-                    name='智能拆书专业流程',
-                    description='基于Long-Novel-GPT-v3.0的三阶段智能拆书流程：剧情提炼 → 章节大纲 → 全书大纲',
-                    category='analysis',
-                    is_active=True,
-                    is_default=True
-                )
-                session.add(workflow)
-                session.flush()  # 获取workflow的id
-                
-                # 创建工作流步骤
-                default_steps = [
-                    {
-                        'name': '剧情提炼',
-                        'description': '从原始章节内容中提炼关键剧情要点，每行对应一个关键场景',
-                        'template_name': '提炼剧情',
-                        'input_source': 'original',
-                        'order_index': 1,
-                        'is_optional': False,
-                        'scope': 'chapter',
-                        'provider_name': 'deepseek',  # 使用通用名称，不包含 free 后缀
-                        'model_name': 'deepseek-chat'
-                    },
-                    {
-                        'name': '章节大纲生成',
-                        'description': '基于提炼的剧情生成章节大纲，关注事件脉络和转折点',
-                        'template_name': '提炼章节大纲',
-                        'input_source': 'previous',
-                        'order_index': 2,
-                        'is_optional': False,
-                        'scope': 'chapter',
-                        'provider_name': 'deepseek',
-                        'model_name': 'deepseek-chat'
-                    },
-                    {
-                        'name': '全书大纲提炼',
-                        'description': '基于所有章节大纲提炼全书大纲，关注整体故事脉络',
-                        'template_name': '提炼全书大纲',
-                        'input_source': 'custom',
-                        'order_index': 3,
-                        'is_optional': True,
-                        'scope': 'global',
-                        'provider_name': 'deepseek',
-                        'model_name': 'deepseek-chat'
+                        'variables': ['all_chapters'],
+                        'is_default': False
                     }
                 ]
-                
-                for step_data in default_steps:
-                    # 查找对应的 prompt_template_id
-                    template_name = step_data['template_name']
-                    template = session.query(PromptTemplate).filter_by(name=template_name).first()
-                    if template:
-                        step_data['prompt_template_id'] = template.id
-                    
-                    step = WorkflowStep(
-                        workflow_id=workflow.id,
-                        **step_data
+
+                for template_data in default_templates:
+                    if not session.query(PromptTemplate).filter_by(name=template_data['name']).first():
+                        template = PromptTemplate(**template_data)
+                        session.add(template)
+
+                # 创建默认工作流
+                if not session.query(Workflow).filter_by(name='智能拆书专业流程').first():
+                    workflow = Workflow(
+                        name='智能拆书专业流程',
+                        description='基于Long-Novel-GPT-v3.0的三阶段智能拆书流程：剧情提炼 → 章节大纲 → 全书大纲',
+                        category='analysis',
+                        is_active=True,
+                        is_default=True
                     )
-                    session.add(step)
-            
-            # 创建默认知识图谱配置
-            if not session.query(KnowledgeGraphConfig).filter_by(is_default=True).first():
-                # 查找第一个可用的AI服务商
-                available_provider = session.query(AIProvider).filter(
-                    AIProvider.api_key.isnot(None),
-                    AIProvider.api_key != ''
-                ).first()
-                
-                # 如果没有配置API密钥的服务商，使用openai-compatible作为占位符
-                if not available_provider:
-                    available_provider = session.query(AIProvider).filter_by(
-                        name='openai-compatible'
+                    session.add(workflow)
+                    session.flush()  # 获取workflow的id
+
+                    # 创建工作流步骤
+                    default_steps = [
+                        {
+                            'name': '剧情提炼',
+                            'description': '从原始章节内容中提炼关键剧情要点，每行对应一个关键场景',
+                            'template_name': '提炼剧情',
+                            'input_source': 'original',
+                            'order_index': 1,
+                            'is_optional': False,
+                            'scope': 'chapter',
+                            'provider_name': 'deepseek',  # 使用通用名称，不包含 free 后缀
+                            'model_name': 'deepseek-chat'
+                        },
+                        {
+                            'name': '章节大纲生成',
+                            'description': '基于提炼的剧情生成章节大纲，关注事件脉络和转折点',
+                            'template_name': '提炼章节大纲',
+                            'input_source': 'previous',
+                            'order_index': 2,
+                            'is_optional': False,
+                            'scope': 'chapter',
+                            'provider_name': 'deepseek',
+                            'model_name': 'deepseek-chat'
+                        },
+                        {
+                            'name': '全书大纲提炼',
+                            'description': '基于所有章节大纲提炼全书大纲，关注整体故事脉络',
+                            'template_name': '提炼全书大纲',
+                            'input_source': 'custom',
+                            'order_index': 3,
+                            'is_optional': True,
+                            'scope': 'global',
+                            'provider_name': 'deepseek',
+                            'model_name': 'deepseek-chat'
+                        }
+                    ]
+
+                    for step_data in default_steps:
+                        # 查找对应的 prompt_template_id
+                        template_name = step_data['template_name']
+                        template = session.query(PromptTemplate).filter_by(name=template_name).first()
+                        if template:
+                            step_data['prompt_template_id'] = template.id
+
+                        step = WorkflowStep(
+                            workflow_id=workflow.id,
+                            **step_data
+                        )
+                        session.add(step)
+
+                # 创建默认知识图谱配置
+                if not session.query(KnowledgeGraphConfig).filter_by(is_default=True).first():
+                    # 查找第一个可用的AI服务商
+                    available_provider = session.query(AIProvider).filter(
+                        AIProvider.api_key.isnot(None),
+                        AIProvider.api_key != ''
                     ).first()
-                
-                default_config = KnowledgeGraphConfig(
-                    name='默认配置',
-                    description='系统默认的知识图谱解析配置，使用规则提取作为备选',
-                    ai_provider=available_provider.name if available_provider else None,
-                    ai_model=available_provider.models[0] if available_provider and available_provider.models else None,
-                    use_ai=bool(available_provider and available_provider.api_key),
-                    max_content_length=4000,
-                    enable_entity_extraction=True,
-                    enable_relation_extraction=True,
-                    is_default=True,
-                    is_system=True
-                )
-                session.add(default_config)
-            
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            raise e
-        finally:
-            session.close()
+
+                    # 如果没有配置API密钥的服务商，使用openai-compatible作为占位符
+                    if not available_provider:
+                        available_provider = session.query(AIProvider).filter_by(
+                            name='openai-compatible'
+                        ).first()
+
+                    default_config = KnowledgeGraphConfig(
+                        name='默认配置',
+                        description='系统默认的知识图谱解析配置，使用规则提取作为备选',
+                        ai_provider=available_provider.name if available_provider else None,
+                        ai_model=available_provider.models[0] if available_provider and available_provider.models else None,
+                        use_ai=bool(available_provider and available_provider.api_key),
+                        max_content_length=4000,
+                        enable_entity_extraction=True,
+                        enable_relation_extraction=True,
+                        is_default=True,
+                        is_system=True
+                    )
+                    session.add(default_config)
+
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                raise
 
 # 全局数据库管理器实例
 db_manager = DatabaseManager()
