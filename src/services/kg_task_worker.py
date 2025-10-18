@@ -52,6 +52,14 @@ def kg_task_worker_process(provider: str):
     except Exception as e:
         logger.warning(f"[KG-Worker] 重置数据库连接池失败: {e}")
 
+    # 重置 Redis 客户端（避免 fork 后连接复用）
+    try:
+        from src.utils.redis_client import close_redis_client
+        close_redis_client()
+        logger.debug("[KG-Worker] 已重置Redis客户端（子进程）")
+    except Exception as e:
+        logger.warning(f"[KG-Worker] 重置Redis客户端失败: {e}")
+
     # 重置 Neo4j 连接（如果使用了连接池）
     try:
         from src.services.knowledge_graph_service import get_kg_service
@@ -59,6 +67,66 @@ def kg_task_worker_process(provider: str):
         logger.debug("[KG-Worker] Neo4j 将在首次使用时重新连接")
     except Exception as e:
         logger.warning(f"[KG-Worker] Neo4j 服务导入失败: {e}")
+
+    # 在进程启动时就注册到 Redis
+    from src.utils.redis_client import get_redis_client
+    import socket
+
+    # 获取节点名称
+    # - 远程节点（worker-service）：使用环境变量 KG_WORKER_NODE_NAME
+    # - 主节点：使用 "主节点-{hostname}" 格式
+    node_name = os.environ.get('KG_WORKER_NODE_NAME')
+    if node_name:
+        logger.debug(f"[KG-Worker] 远程节点 Worker: node_name={node_name}")
+    else:
+        # 主节点：生成默认节点名
+        try:
+            hostname = socket.gethostname()
+        except:
+            hostname = 'unknown'
+        node_name = f"主节点-{hostname}"
+        logger.debug(f"[KG-Worker] 主节点 Worker: node_name={node_name}")
+
+    def register_worker_to_redis(task_id=None, start_time=None):
+        """注册或更新 Worker 状态到 Redis"""
+        try:
+            redis_client = get_redis_client()
+            if not redis_client:
+                logger.error(f"[KG-Worker] 无法获取Redis客户端，注册失败: pid={os.getpid()}")
+                return False
+
+            worker_key = f"kg:worker:{os.getpid()}"
+            worker_data = {
+                'provider': provider,
+                'pid': os.getpid(),
+                'node_name': node_name,
+                'last_heartbeat': time.time()
+            }
+            if task_id is not None:
+                worker_data['task_id'] = task_id
+                worker_data['start_time'] = start_time or time.time()
+
+            success = redis_client.hmset(worker_key, worker_data)
+            if success:
+                redis_client.expire(worker_key, 3600)  # 1小时过期（支持长时间任务）
+                logger.info(f"[KG-Worker] 注册成功: pid={os.getpid()}, task_id={task_id or '空闲'}, node={node_name}")
+                return True
+            else:
+                logger.error(f"[KG-Worker] hmset失败: pid={os.getpid()}, provider={provider}")
+                return False
+        except Exception as e:
+            logger.error(f"[KG-Worker] 注册Worker状态到Redis失败: {e}", exc_info=True)
+            return False
+
+    # 进程启动时立即注册
+    register_success = register_worker_to_redis()
+    if register_success:
+        logger.info(f"[KG-Worker] Worker 启动成功: pid={os.getpid()}, node={node_name}, provider={provider}")
+    else:
+        logger.error(f"[KG-Worker] Worker 启动失败（Redis注册失败）: pid={os.getpid()}, provider={provider}")
+
+    # 心跳计数器
+    heartbeat_counter = 0
 
     while True:
         try:
@@ -89,38 +157,22 @@ def kg_task_worker_process(provider: str):
 
             item = brpop_task(provider, timeout=3)
             if not item:
-                # 无任务，稍作等待
+                # 无任务，定期更新心跳
+                heartbeat_counter += 1
+                if heartbeat_counter % 20 == 0:  # 每60秒左右更新一次心跳 (20次 * 3秒)
+                    success = register_worker_to_redis()
+                    if success:
+                        logger.info(f"[KG-Worker] 心跳更新成功: provider={provider}, pid={os.getpid()}, counter={heartbeat_counter}")
+                    else:
+                        logger.error(f"[KG-Worker] 心跳更新失败: provider={provider}, pid={os.getpid()}")
                 time.sleep(0.2)
                 continue
 
             task_id = int(item.get('task_id'))
             logger.info(f"[KG-Worker] 取到任务: provider={provider}, task_id={task_id}")
 
-            # 记录当前进程正在处理的任务到 Redis
-            try:
-                from src.utils.redis_client import get_redis_client
-                import socket
-                redis_client = get_redis_client()
-                if redis_client:
-                    # 获取节点名称（优先使用环境变量，否则使用主机名）
-                    node_name = os.environ.get('KG_WORKER_NODE_NAME')
-                    if not node_name:
-                        try:
-                            node_name = socket.gethostname()
-                        except:
-                            node_name = 'unknown'
-
-                    worker_key = f"kg:worker:{os.getpid()}"
-                    redis_client.hmset(worker_key, {
-                        'provider': provider,
-                        'task_id': task_id,
-                        'start_time': time.time(),
-                        'pid': os.getpid(),
-                        'node_name': node_name
-                    })
-                    redis_client.expire(worker_key, 3600)  # 1小时过期
-            except Exception as e:
-                logger.warning(f"[KG-Worker] 记录Worker状态到Redis失败: {e}")
+            # 更新 Worker 状态：记录当前正在处理的任务
+            register_worker_to_redis(task_id=task_id, start_time=time.time())
 
             # 获取提取器实例
             if extractor is None:
@@ -141,14 +193,9 @@ def kg_task_worker_process(provider: str):
                 # 执行任务（内部含原子 start + 章节事务 + 进度推送）
                 extractor.build_knowledge_graph_with_task(task_id)
             finally:
-                # 任务完成后清除 Worker 状态
-                try:
-                    from src.utils.redis_client import get_redis_client
-                    redis_client = get_redis_client()
-                    if redis_client:
-                        redis_client.delete(f"kg:worker:{os.getpid()}")
-                except Exception as e:
-                    logger.warning(f"[KG-Worker] 清除Worker状态失败: {e}")
+                # 任务完成后，更新 Worker 状态为空闲（不删除记录）
+                register_worker_to_redis()  # 不传task_id，表示空闲状态
+                heartbeat_counter = 0  # 重置心跳计数器
 
             backoff = 1
         except Exception as e:
@@ -160,30 +207,16 @@ def kg_task_worker_process(provider: str):
 def _list_active_providers() -> List[str]:
     """查询激活的 AIProvider 名称列表（小写）"""
     try:
-        import sys
-        print(">>> [DEBUG] 正在查询数据库中的 AIProvider...")
-        sys.stdout.flush()
-
         from src.models.database import db_manager, AIProvider
         session = db_manager.get_session()
         try:
             rows = session.query(AIProvider.name).filter_by(is_active=True).all()
             providers = [name.lower() for (name,) in rows]
-
-            print(f">>> [DEBUG] 从数据库查询到 {len(providers)} 个激活的 AIProvider")
-            print(f">>> [DEBUG] Providers: {providers}")
-            sys.stdout.flush()
-
-            logger.info(f"[KG-Worker] 从数据库查询到 {len(providers)} 个激活的 AIProvider: {providers}")
             return providers
         finally:
             session.close()
     except Exception as e:
-        print(f">>> [ERROR] 加载 AIProvider 列表失败: {e}")
-        sys.stdout.flush()
-        import traceback
-        traceback.print_exc()
-        logger.error(f"加载 AIProvider 列表失败: {e}", exc_info=True)
+        logger.error(f"加载 AIProvider 列表失败: {e}")
         return []
 
 
@@ -202,37 +235,17 @@ def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: 
         # 若已启动，仍允许为新增的provider补齐进程（避免整体跳过）
         # 故不直接 return，而是继续走后续逻辑计算需要新起的providers
 
-        import sys
-        print(f">>> [DEBUG] start_kg_task_workers 被调用，providers参数: {providers}")
-        sys.stdout.flush()
-
         if providers is None:
-            print(">>> [DEBUG] providers 参数为 None，正在自动发现...")
-            sys.stdout.flush()
             providers = _list_active_providers()
-
         providers = [p.strip().lower() for p in (providers or []) if p]
-
-        print(f">>> [DEBUG] 处理后的 providers 列表: {providers}")
-        sys.stdout.flush()
-
         if include_rules and 'rules' not in providers:
-            print(">>> [DEBUG] 添加 'rules' provider")
-            sys.stdout.flush()
             providers.append('rules')
-
-        print(f">>> [DEBUG] 最终 providers 列表: {providers}")
-        sys.stdout.flush()
 
         if not providers:
             logger.warning("[KG-Worker] 没有可用provider，跳过启动")
-            print(">>> [WARNING] 没有可用的 provider，跳过启动")
-            sys.stdout.flush()
             return
 
         logger.info(f"[KG-Worker] 启动provider进程: {providers}, per={per_provider_processes}")
-        print(f">>> [DEBUG] 准备启动 {len(providers)} 个 providers，每个 {per_provider_processes} 个进程")
-        sys.stdout.flush()
 
         # 过滤掉已存在且存活的 provider（按当前进程名判断）
         existing = {}  # provider -> count
@@ -313,6 +326,8 @@ def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: 
 def get_worker_stats() -> dict:
     """获取 Worker 进程与队列的基本状态
 
+    支持分布式部署：从 Redis 读取所有节点的 Worker 信息
+
     Returns:
         {
           'started': bool,
@@ -329,14 +344,16 @@ def get_worker_stats() -> dict:
     """
     from .kg_task_queue_service import queue_length
     from src.utils.redis_client import get_redis_client
+    import psutil
 
     stats = {
         'started': _workers_started,
         'providers': {}
     }
 
-    # 统计进程
     prov_map = {}
+
+    # 方案1：统计本地启动的进程（向后兼容）
     for p in _worker_processes:
         name = p.name or ''
         # 名称格式: KGTaskWorker-{provider}-{i}
@@ -356,6 +373,95 @@ def get_worker_stats() -> dict:
         prov['processes'] += 1
         prov['alive'] += 1 if p.is_alive() else 0
         prov['pids'].append(p.pid)
+
+    # 方案2：从 Redis 读取所有节点的 Worker（支持分布式）
+    redis_client = None
+    stale_worker_keys = []  # 记录需要清理的过期 worker keys
+
+    try:
+        redis_client = get_redis_client()
+        if redis_client:
+            worker_keys = redis_client.keys('kg:worker:*')
+            for key in worker_keys:
+                try:
+                    key_str = key.decode() if isinstance(key, bytes) else key
+                    pid = int(key_str.replace('kg:worker:', ''))
+
+                    # 读取 Worker 信息（Hash 类型）
+                    worker_info = redis_client.hgetall(key)
+                    if not worker_info:
+                        continue
+
+                    # 解析 provider 和 node_name
+                    provider_raw = worker_info.get(b'provider') if isinstance(list(worker_info.keys())[0], bytes) else worker_info.get('provider')
+                    provider = (provider_raw.decode() if isinstance(provider_raw, bytes) else provider_raw) if provider_raw else 'unknown'
+
+                    node_name_raw = worker_info.get(b'node_name') if isinstance(list(worker_info.keys())[0], bytes) else worker_info.get('node_name')
+                    node_name = (node_name_raw.decode() if isinstance(node_name_raw, bytes) else node_name_raw) if node_name_raw else None
+
+                    # 健康检查：验证进程是否真实存在
+                    is_alive = False
+
+                    # 主节点 Worker：node_name 以"主节点-"开头，使用本地进程检查
+                    if node_name and node_name.startswith('主节点-'):
+                        try:
+                            if psutil.pid_exists(pid):
+                                process = psutil.Process(pid)
+                                # 检查进程名称中是否包含 python（Worker 进程是 Python 进程）
+                                if 'python' in process.name().lower():
+                                    is_alive = True
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    elif node_name:
+                        # 远程节点：检查节点心跳是否存在（依赖 Redis TTL 自动清理过期节点）
+                        node_key = f"kg:nodes:{node_name}"
+                        node_info = redis_client.hgetall(node_key)
+                        if node_info:
+                            # 节点心跳存在且未过期，信任该节点的所有 Worker 进程
+                            is_alive = True
+                        else:
+                            # 节点心跳不存在（可能已过期或节点已退出），标记 Worker 为过期
+                            logger.debug(f"节点心跳不存在，标记 Worker 为过期: node={node_name}, pid={pid}")
+                    else:
+                        # 兼容旧版本：没有 node_name 的本地 Worker，直接检查进程
+                        try:
+                            if psutil.pid_exists(pid):
+                                process = psutil.Process(pid)
+                                # 检查进程名称中是否包含 python（Worker 进程是 Python 进程）
+                                if 'python' in process.name().lower():
+                                    is_alive = True
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                    # 如果进程不存在，标记为过期，稍后清理
+                    if not is_alive:
+                        stale_worker_keys.append(key_str)
+                        logger.debug(f"检测到过期的 Worker 进程: pid={pid}, provider={provider}, node={node_name or '本地'}")
+                        continue
+
+                    # 如果这个 PID 不在本地列表中，添加到统计
+                    prov = prov_map.setdefault(provider, {'processes': 0, 'alive': 0, 'pids': [], 'active_tasks': []})
+                    if pid not in prov['pids']:
+                        prov['processes'] += 1
+                        prov['alive'] += 1  # 通过健康检查的都认为是活跃的
+                        prov['pids'].append(pid)
+                except Exception as e:
+                    logger.debug(f"解析 Worker Key 失败: {key}, {e}")
+                    continue
+
+            # 清理过期的 Worker keys
+            if stale_worker_keys:
+                try:
+                    redis_client.delete(*stale_worker_keys)
+                    logger.info(f"清理了 {len(stale_worker_keys)} 个过期的 Worker 进程记录")
+                except Exception as e:
+                    logger.warning(f"清理过期 Worker keys 失败: {e}")
+
+            # 如果从 Redis 读到了 Worker，设置 started 为 True
+            if prov_map:
+                stats['started'] = True
+    except Exception as e:
+        logger.warning(f"从 Redis 读取全局 Worker 失败: {e}")
 
     # 从 Redis 读取每个进程正在处理的任务和节点信息
     try:
@@ -394,9 +500,18 @@ def get_worker_stats() -> dict:
                                 except Exception:
                                     pass
 
-                                # 如果没有 node_name 字段，说明是旧版本 Worker，需要重启
-                                if not node_name:
+                                # 处理 node_name 显示
+                                # - None 或空字符串：兼容旧版本，显示"主节点"
+                                # - 以"主节点-"开头：直接显示
+                                # - 其他：正常显示
+                                # - 缺少 node_name 字段：真正的旧版本，需要重启
+                                if node_name is None or node_name == 'None' or node_name == '':
+                                    # 兼容旧版本的主节点 Worker
+                                    node_name = '主节点'
+                                elif 'node_name' not in worker_info:
+                                    # 真正缺少 node_name 字段（旧版本代码）
                                     node_name = '旧版本(需重启)'
+                                # 否则直接使用 node_name（包括"主节点-xxx"和远程节点名）
 
                                 prov_data['active_tasks'].append({
                                     'task_id': task_id,
@@ -484,6 +599,7 @@ def start_auto_worker_guard(interval_seconds: int = 30):
     - 通过环境变量 KG_WORKERS_PER_PROVIDER 控制每个Provider进程数（默认1）
     - 始终包含 'rules' Provider（除非明确不需要，可自行在代码处关掉 include_rules）
     - 防止重复启动守护线程
+    - 定期检查并清理僵尸任务（状态为 running 但实际未在执行的任务）
     """
     global _guard_thread, _guard_running
 
@@ -501,6 +617,69 @@ def start_auto_worker_guard(interval_seconds: int = 30):
 
         _guard_running = True
 
+        def _check_zombie_tasks():
+            """检查并清理僵尸任务（状态为 running 但没有 Worker 在处理）"""
+            try:
+                from src.models.database import db_manager, KnowledgeGraphTask
+                from src.utils.redis_client import get_redis_client
+
+                # 1. 获取所有活跃任务的 task_id
+                stats = get_worker_stats()
+                active_task_ids = set()
+                for prov_stats in stats.get('providers', {}).values():
+                    for task in prov_stats.get('active_tasks', []):
+                        active_task_ids.add(task.get('task_id'))
+
+                # 2. 查询数据库中状态为 running 的任务
+                session = db_manager.get_session()
+                try:
+                    running_tasks = session.query(KnowledgeGraphTask.id).filter_by(status='running').all()
+                    running_task_ids = {t.id for t in running_tasks}
+
+                    # 3. 找出僵尸任务（数据库中 running 但实际未在执行）
+                    zombie_task_ids = running_task_ids - active_task_ids
+
+                    if zombie_task_ids:
+                        logger.warning(f"[KG-WorkerGuard] 发现 {len(zombie_task_ids)} 个僵尸任务")
+
+                        # 4. 逐个检查僵尸任务并修复状态
+                        fixed_count = 0
+                        for task_id in zombie_task_ids:
+                            task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
+                            if not task:
+                                continue
+
+                            # 检查任务的完成情况
+                            total_chapters = task.end_chapter - task.start_chapter + 1 if task.end_chapter and task.start_chapter else 0
+                            processed = task.processed_chapters or 0
+
+                            # 判断任务应该设置为什么状态
+                            if processed >= total_chapters and total_chapters > 0:
+                                # 所有章节已处理完成
+                                task.status = 'completed'
+                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} 已完成，修正状态为 completed")
+                            elif task.error_message or task.failed_count > 0:
+                                # 有错误记录
+                                task.status = 'failed'
+                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} 有错误，修正状态为 failed")
+                            else:
+                                # 重置为 created，允许重新执行
+                                task.status = 'created'
+                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} 重置状态为 created")
+
+                            fixed_count += 1
+
+                        session.commit()
+                        logger.info(f"[KG-WorkerGuard] 已修复 {fixed_count} 个僵尸任务状态")
+                    else:
+                        logger.debug(f"[KG-WorkerGuard] 未发现僵尸任务（{len(running_task_ids)} 个 running 任务都在正常执行）")
+
+                finally:
+                    session.close()
+
+            except Exception as e:
+                logger.error(f"[KG-WorkerGuard] 检查僵尸任务失败: {e}", exc_info=True)
+
         def _loop():
             per = _env_workers_per_provider(default=1)
             logger.info(f"[KG-WorkerGuard] 启动，周期={interval_seconds}s，每Provider进程数={per}")
@@ -515,6 +694,12 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                     if loop_count % 10 == 0:
                         total_alive = len([p for p in _worker_processes if p.is_alive()])
                         logger.debug(f"[KG-WorkerGuard] 健康检查: {total_alive} 个活跃Worker进程")
+
+                    # 每20次循环（约10分钟，假设interval=30s）检查一次僵尸任务
+                    if loop_count % 20 == 0:
+                        logger.info(f"[KG-WorkerGuard] 开始检查僵尸任务...")
+                        _check_zombie_tasks()
+
                 except Exception as e:
                     logger.error(f"[KG-WorkerGuard] 保活失败: {e}", exc_info=True)
                 # 休眠
