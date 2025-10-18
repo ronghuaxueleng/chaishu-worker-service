@@ -100,6 +100,22 @@ def validate_environment():
 
 def main():
     """Worker 节点主函数"""
+    # 设置 multiprocessing 启动方法（可选，默认使用系统默认）
+    import multiprocessing
+    start_method = os.environ.get('MULTIPROCESSING_START_METHOD', '').lower()
+    if start_method in ('fork', 'spawn', 'forkserver'):
+        try:
+            multiprocessing.set_start_method(start_method, force=True)
+            print(f">>> [DEBUG] 设置 multiprocessing start method: {start_method}")
+            sys.stdout.flush()
+        except RuntimeError:
+            print(f">>> [DEBUG] multiprocessing start method 已设置为: {multiprocessing.get_start_method()}")
+            sys.stdout.flush()
+    else:
+        current_method = multiprocessing.get_start_method()
+        print(f">>> [DEBUG] 使用系统默认 multiprocessing start method: {current_method}")
+        sys.stdout.flush()
+
     # 打印横幅
     print_banner()
 
