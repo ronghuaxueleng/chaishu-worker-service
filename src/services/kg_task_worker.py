@@ -691,6 +691,54 @@ def start_auto_worker_guard(interval_seconds: int = 30):
             except Exception as e:
                 logger.error(f"[KG-WorkerGuard] 检查僵尸任务失败: {e}", exc_info=True)
 
+        def _auto_start_created_tasks():
+            """自动启动 created 状态的任务（限流）"""
+            try:
+                from src.models.database import db_manager, KnowledgeGraphTask
+                from src.services.kg_task_queue_service import enqueue_task
+                from src.api.kg_task_routes import _choose_provider_for_ai_task
+
+                session = db_manager.get_session()
+                try:
+                    # 查询 created 状态的任务（限制每次最多启动 20 个）
+                    created_tasks = session.query(KnowledgeGraphTask).filter_by(
+                        status='created'
+                    ).limit(20).all()
+
+                    if not created_tasks:
+                        logger.debug("[KG-WorkerGuard] 没有待启动的 created 任务")
+                        return
+
+                    logger.info(f"[KG-WorkerGuard] 发现 {len(created_tasks)} 个待启动任务，开始自动入队...")
+
+                    enqueued_count = 0
+                    for task in created_tasks:
+                        try:
+                            # 选择最优 Provider
+                            if task.use_ai:
+                                provider = _choose_provider_for_ai_task()
+                            else:
+                                provider = 'rules'
+
+                            # 将任务入队
+                            if enqueue_task(task.id, provider):
+                                enqueued_count += 1
+                                logger.info(f"[KG-WorkerGuard] 任务 {task.id} ({task.task_name}) 已入队到 {provider}")
+                            else:
+                                logger.warning(f"[KG-WorkerGuard] 任务 {task.id} 入队失败")
+
+                        except Exception as e:
+                            logger.error(f"[KG-WorkerGuard] 启动任务 {task.id} 失败: {e}")
+
+                    if enqueued_count > 0:
+                        logger.info(f"[KG-WorkerGuard] 成功入队 {enqueued_count} 个任务")
+
+                finally:
+                    session.close()
+
+            except Exception as e:
+                logger.error(f"[KG-WorkerGuard] 自动启动任务失败: {e}", exc_info=True)
+
         def _loop():
             per = _env_workers_per_provider(default=1)
             logger.info(f"[KG-WorkerGuard] 启动，周期={interval_seconds}s，每Provider进程数={per}")
@@ -699,12 +747,20 @@ def start_auto_worker_guard(interval_seconds: int = 30):
             logger.info(f"[KG-WorkerGuard] 启动时检查僵尸任务...")
             _check_zombie_tasks()
 
+            # 启动时自动入队 created 任务
+            logger.info(f"[KG-WorkerGuard] 启动时检查待启动任务...")
+            _auto_start_created_tasks()
+
             loop_count = 0
             while _guard_running:
                 try:
                     loop_count += 1
                     # 该函数具备去重能力：仅为缺失的provider拉起进程
                     start_kg_task_workers(per_provider_processes=per)
+
+                    # 每5次循环（约2.5分钟，假设interval=30s）自动启动 created 任务
+                    if loop_count % 5 == 0:
+                        _auto_start_created_tasks()
 
                     # 每10次循环输出一次健康检查日志
                     if loop_count % 10 == 0:
