@@ -650,22 +650,26 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                                 continue
 
                             # 检查任务的完成情况
-                            total_chapters = task.end_chapter - task.start_chapter + 1 if task.end_chapter and task.start_chapter else 0
-                            processed = task.processed_chapters or 0
+                            total_chapters = task.total_chapters or 0
+                            completed = task.completed_chapters or 0
+                            failed = task.failed_chapters or 0
 
                             # 判断任务应该设置为什么状态
-                            if processed >= total_chapters and total_chapters > 0:
+                            if completed >= total_chapters and total_chapters > 0:
                                 # 所有章节已处理完成
                                 task.status = 'completed'
-                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} 已完成，修正状态为 completed")
-                            elif task.error_message or task.failed_count > 0:
+                                if not task.completed_at:
+                                    from datetime import datetime
+                                    task.completed_at = datetime.now()
+                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 已完成 {completed}/{total_chapters} 章节，修正状态为 completed")
+                            elif task.error_message or failed > 0:
                                 # 有错误记录
                                 task.status = 'failed'
-                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} 有错误，修正状态为 failed")
+                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 有错误（失败章节: {failed}），修正状态为 failed")
                             else:
                                 # 重置为 created，允许重新执行
                                 task.status = 'created'
-                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} 重置状态为 created")
+                                logger.info(f"[KG-WorkerGuard] 僵尸任务 {task_id} ({task.task_name}) 进度 {completed}/{total_chapters}，重置状态为 created")
 
                             fixed_count += 1
 
