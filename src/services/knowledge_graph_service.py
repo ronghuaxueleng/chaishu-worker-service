@@ -62,12 +62,13 @@ class KnowledgeGraphService:
                 user = os.environ.get('NEO4J_USER', 'neo4j')
                 password = os.environ.get('NEO4J_PASSWORD', 'password')
 
-                # 配置连接池参数（优化网络稳定性）
+                # 配置连接池参数（优化网络稳定性和资源使用）
+                # Worker 进程数量多，每个进程使用小连接池避免耗尽服务器资源
                 config_options = {
-                    'max_connection_pool_size': 10,  # 减小连接池大小
-                    'max_connection_lifetime': 60,  # 连接最大生存时间1分钟（避免defunct连接）
-                    'connection_acquisition_timeout': 10,  # 获取连接超时（秒）
-                    'connection_timeout': 5,  # 连接超时（秒）
+                    'max_connection_pool_size': 2,  # 每个进程最多2个连接（28进程×2=56总连接）
+                    'max_connection_lifetime': 3600,  # 连接最大生存时间1小时（减少重建频率）
+                    'connection_acquisition_timeout': 30,  # 获取连接超时30秒
+                    'connection_timeout': 10,  # 建立连接超时10秒
                     'keep_alive': True,  # 保持连接活跃
                 }
 
