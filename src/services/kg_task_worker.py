@@ -160,16 +160,29 @@ def kg_task_worker_process(provider: str):
 def _list_active_providers() -> List[str]:
     """查询激活的 AIProvider 名称列表（小写）"""
     try:
+        import sys
+        print(">>> [DEBUG] 正在查询数据库中的 AIProvider...")
+        sys.stdout.flush()
+
         from src.models.database import db_manager, AIProvider
         session = db_manager.get_session()
         try:
             rows = session.query(AIProvider.name).filter_by(is_active=True).all()
             providers = [name.lower() for (name,) in rows]
+
+            print(f">>> [DEBUG] 从数据库查询到 {len(providers)} 个激活的 AIProvider")
+            print(f">>> [DEBUG] Providers: {providers}")
+            sys.stdout.flush()
+
             logger.info(f"[KG-Worker] 从数据库查询到 {len(providers)} 个激活的 AIProvider: {providers}")
             return providers
         finally:
             session.close()
     except Exception as e:
+        print(f">>> [ERROR] 加载 AIProvider 列表失败: {e}")
+        sys.stdout.flush()
+        import traceback
+        traceback.print_exc()
         logger.error(f"加载 AIProvider 列表失败: {e}", exc_info=True)
         return []
 
@@ -189,17 +202,37 @@ def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: 
         # 若已启动，仍允许为新增的provider补齐进程（避免整体跳过）
         # 故不直接 return，而是继续走后续逻辑计算需要新起的providers
 
+        import sys
+        print(f">>> [DEBUG] start_kg_task_workers 被调用，providers参数: {providers}")
+        sys.stdout.flush()
+
         if providers is None:
+            print(">>> [DEBUG] providers 参数为 None，正在自动发现...")
+            sys.stdout.flush()
             providers = _list_active_providers()
+
         providers = [p.strip().lower() for p in (providers or []) if p]
+
+        print(f">>> [DEBUG] 处理后的 providers 列表: {providers}")
+        sys.stdout.flush()
+
         if include_rules and 'rules' not in providers:
+            print(">>> [DEBUG] 添加 'rules' provider")
+            sys.stdout.flush()
             providers.append('rules')
+
+        print(f">>> [DEBUG] 最终 providers 列表: {providers}")
+        sys.stdout.flush()
 
         if not providers:
             logger.warning("[KG-Worker] 没有可用provider，跳过启动")
+            print(">>> [WARNING] 没有可用的 provider，跳过启动")
+            sys.stdout.flush()
             return
 
         logger.info(f"[KG-Worker] 启动provider进程: {providers}, per={per_provider_processes}")
+        print(f">>> [DEBUG] 准备启动 {len(providers)} 个 providers，每个 {per_provider_processes} 个进程")
+        sys.stdout.flush()
 
         # 过滤掉已存在且存活的 provider（按当前进程名判断）
         existing = {}  # provider -> count
