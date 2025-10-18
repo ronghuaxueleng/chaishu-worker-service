@@ -626,7 +626,39 @@ class DatabaseManager:
         return {}
     
     def _get_database_url_from_config(self):
-        """从配置文件获取数据库URL，默认使用SQLite，支持base64编码"""
+        """从配置文件获取数据库URL，优先使用环境变量，默认使用SQLite，支持base64编码"""
+
+        # 优先从环境变量读取数据库配置
+        db_type_env = os.environ.get('DB_TYPE', '').lower()
+
+        if db_type_env == 'mysql' or (os.environ.get('DB_HOST') and os.environ.get('DB_NAME')):
+            # 从环境变量构建 MySQL 连接字符串
+            try:
+                host = os.environ.get('DB_HOST', 'localhost')
+                port = int(os.environ.get('DB_PORT', '3306'))
+                user = os.environ.get('DB_USER', 'root')
+                password = os.environ.get('DB_PASSWORD', '')
+                database = os.environ.get('DB_NAME', 'chaishu')
+                charset = os.environ.get('DB_CHARSET', 'utf8mb4')
+
+                from urllib.parse import quote_plus
+                encoded_password = quote_plus(password)
+                mysql_url = f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{database}?charset={charset}"
+                logger.info(f"[数据库] 从环境变量加载 MySQL 配置: {host}:{port}/{database}")
+                return mysql_url
+            except Exception as e:
+                logger.error(f"从环境变量构建 MySQL 连接失败: {e}")
+
+        elif db_type_env == 'sqlite' or os.environ.get('DB_PATH'):
+            # 从环境变量构建 SQLite 连接字符串
+            db_path = os.environ.get('DB_PATH', 'data/chaishu.db')
+            if not os.path.isabs(db_path):
+                db_path = os.path.join(os.path.dirname(__file__), '../../', db_path)
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            logger.info(f"[数据库] 从环境变量加载 SQLite 配置: {db_path}")
+            return f"sqlite:///{db_path}"
+
+        # 如果环境变量未配置，尝试从 config.json 读取
         try:
             # 使用统一配置管理器
             from ..config import get_database_config
@@ -644,7 +676,7 @@ class DatabaseManager:
             except Exception as e:
                 logger.error(f"配置文件读取失败: {e}")
                 db_config = {}
-        
+
         try:
             if db_config:
                 db_type = db_config.get('type', 'sqlite')
