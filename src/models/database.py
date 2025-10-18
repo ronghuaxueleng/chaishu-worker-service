@@ -578,8 +578,13 @@ class DatabaseManager:
             engine_kwargs['connect_args'] = {
                 'charset': 'utf8mb4',
                 'autocommit': False,
+                'connect_timeout': 10,  # 连接超时10秒
+                'read_timeout': 30,  # 读超时30秒
+                'write_timeout': 30,  # 写超时30秒
                 'init_command': 'SET sql_mode="STRICT_TRANS_TABLES"'
             }
+            # 缩短连接回收时间，避免连接过期
+            engine_kwargs['pool_recycle'] = min(engine_kwargs.get('pool_recycle', 3600), 1800)
         
         self.engine = create_engine(database_url, **engine_kwargs)
 
