@@ -220,6 +220,24 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    # 启动连接池监控
+    print(">>> [DEBUG] 启动连接池监控...")
+    sys.stdout.flush()
+    try:
+        from src.models.database import db_manager
+        from src.services.connection_pool_monitor import start_connection_pool_monitor
+
+        # 每分钟检查一次连接池状态
+        start_connection_pool_monitor(db_manager, check_interval=60)
+        logger.info("✓ 连接池监控已启动（每分钟检查一次）")
+        print(">>> [DEBUG] 连接池监控已启动")
+        sys.stdout.flush()
+    except Exception as e:
+        logger.warning(f"⚠ 连接池监控启动失败: {e}")
+        print(f">>> [DEBUG] 连接池监控启动失败（非致命错误）: {e}")
+        sys.stdout.flush()
+
+
     # 显示活跃进程信息
     print(">>> [DEBUG] 获取进程统计...")
     sys.stdout.flush()
