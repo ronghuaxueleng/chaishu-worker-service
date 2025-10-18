@@ -65,11 +65,13 @@ class KnowledgeGraphService:
                 # 配置连接池参数（优化网络稳定性和资源使用）
                 # Worker 进程数量多，每个进程使用小连接池避免耗尽服务器资源
                 config_options = {
-                    'max_connection_pool_size': 2,  # 每个进程最多2个连接（28进程×2=56总连接）
-                    'max_connection_lifetime': 3600,  # 连接最大生存时间1小时（减少重建频率）
-                    'connection_acquisition_timeout': 30,  # 获取连接超时30秒
-                    'connection_timeout': 10,  # 建立连接超时10秒
+                    'max_connection_pool_size': 1,  # 每个进程只用1个连接（28进程×1=28总连接，降低服务器压力）
+                    'max_connection_lifetime': 7200,  # 连接最大生存时间2小时（减少重建频率）
+                    'connection_acquisition_timeout': 60,  # 获取连接超时60秒（网络不稳定时需要更长时间）
+                    'connection_timeout': 30,  # 建立连接超时30秒（从10秒增加到30秒）
                     'keep_alive': True,  # 保持连接活跃
+                    'max_transaction_retry_time': 30,  # 事务重试时间30秒
+                    'resolver': None,  # 使用默认解析器
                 }
 
                 self.driver = GraphDatabase.driver(uri, auth=(user, password), **config_options)
