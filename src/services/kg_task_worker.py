@@ -642,9 +642,12 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                     if zombie_task_ids:
                         logger.warning(f"[KG-WorkerGuard] 发现 {len(zombie_task_ids)} 个僵尸任务")
 
-                        # 4. 逐个检查僵尸任务并修复状态
+                        # 4. 逐个检查僵尸任务并修复状态（限制每次最多100个，避免数据库压力）
                         fixed_count = 0
-                        for task_id in zombie_task_ids:
+                        max_fix_per_check = 100
+                        sample_zombie_ids = list(zombie_task_ids)[:max_fix_per_check]
+
+                        for task_id in sample_zombie_ids:
                             task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
                             if not task:
                                 continue
@@ -674,7 +677,11 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                             fixed_count += 1
 
                         session.commit()
-                        logger.info(f"[KG-WorkerGuard] 已修复 {fixed_count} 个僵尸任务状态")
+                        remaining = len(zombie_task_ids) - fixed_count
+                        if remaining > 0:
+                            logger.info(f"[KG-WorkerGuard] 本次修复 {fixed_count} 个僵尸任务，剩余 {remaining} 个将在下���检查时处理")
+                        else:
+                            logger.info(f"[KG-WorkerGuard] 已修复所有 {fixed_count} 个僵尸任务")
                     else:
                         logger.debug(f"[KG-WorkerGuard] 未发现僵尸任务（{len(running_task_ids)} 个 running 任务都在正常执行）")
 
@@ -687,6 +694,11 @@ def start_auto_worker_guard(interval_seconds: int = 30):
         def _loop():
             per = _env_workers_per_provider(default=1)
             logger.info(f"[KG-WorkerGuard] 启动，周期={interval_seconds}s，每Provider进程数={per}")
+
+            # 启动时立即执行一次僵尸任务检查
+            logger.info(f"[KG-WorkerGuard] 启动时检查僵尸任务...")
+            _check_zombie_tasks()
+
             loop_count = 0
             while _guard_running:
                 try:
@@ -701,7 +713,7 @@ def start_auto_worker_guard(interval_seconds: int = 30):
 
                     # 每20次循环（约10分钟，假设interval=30s）检查一次僵尸任务
                     if loop_count % 20 == 0:
-                        logger.info(f"[KG-WorkerGuard] 开始检查僵尸任务...")
+                        logger.info(f"[KG-WorkerGuard] 定期检查僵尸任务...")
                         _check_zombie_tasks()
 
                 except Exception as e:
