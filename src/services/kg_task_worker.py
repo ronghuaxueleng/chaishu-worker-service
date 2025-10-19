@@ -7,6 +7,7 @@ import multiprocessing
 import threading
 import os
 import time
+import signal
 from typing import List, Optional
 
 from .kg_task_queue_service import brpop_task
@@ -25,6 +26,43 @@ _worker_lock = threading.Lock()
 # 最大进程数限制（保护机制）
 MAX_TOTAL_PROCESSES = int(os.environ.get('KG_MAX_TOTAL_PROCESSES', '50'))
 MAX_PROCESSES_PER_PROVIDER = int(os.environ.get('KG_MAX_PROCESSES_PER_PROVIDER', '10'))
+# 任务执行超时时间（秒）- 默认5分钟
+TASK_EXECUTION_TIMEOUT = int(os.environ.get('KG_TASK_TIMEOUT', '300'))
+
+
+class TaskTimeoutError(Exception):
+    """任务执行超时异常"""
+    pass
+
+
+class TaskExecutionTimeout:
+    """任务执行超时上下文管理器
+
+    使用 signal.alarm() 实现超时控制（仅支持Linux/Unix）
+    """
+
+    def __init__(self, seconds: int, task_id: int):
+        self.seconds = seconds
+        self.task_id = task_id
+        self.old_handler = None
+
+    def _timeout_handler(self, signum, frame):
+        """超时信号处理器"""
+        raise TaskTimeoutError(f"任务 {self.task_id} 执行超时（{self.seconds}秒）")
+
+    def __enter__(self):
+        # 设置超时信号处理器
+        self.old_handler = signal.signal(signal.SIGALRM, self._timeout_handler)
+        signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # 取消超时
+        signal.alarm(0)
+        # 恢复原有信号处理器
+        if self.old_handler is not None:
+            signal.signal(signal.SIGALRM, self.old_handler)
+        return False
 
 
 def kg_task_worker_process(provider: str):
@@ -201,7 +239,37 @@ def kg_task_worker_process(provider: str):
 
             try:
                 # 执行任务（内部含原子 start + 章节事务 + 进度推送）
-                extractor.build_knowledge_graph_with_task(task_id)
+                # 使用超时控制，防止任务卡死
+                logger.info(f"[KG-Worker] 开始执行任务 {task_id}，超时限制: {TASK_EXECUTION_TIMEOUT}秒")
+                start_exec_time = time.time()
+
+                try:
+                    with TaskExecutionTimeout(TASK_EXECUTION_TIMEOUT, task_id):
+                        extractor.build_knowledge_graph_with_task(task_id)
+
+                    exec_duration = time.time() - start_exec_time
+                    logger.info(f"[KG-Worker] 任务 {task_id} 执行完成，耗时: {exec_duration:.1f}秒")
+
+                except TaskTimeoutError as te:
+                    # 任务执行超时
+                    exec_duration = time.time() - start_exec_time
+                    logger.error(f"[KG-Worker] 任务 {task_id} 执行超时！已运行: {exec_duration:.1f}秒, 超时阈值: {TASK_EXECUTION_TIMEOUT}秒")
+                    logger.error(f"[KG-Worker] 超时详情: {te}")
+
+                    # 将任务标记为暂停状态，记录超时错误
+                    try:
+                        from src.services.knowledge_graph_task_service import kg_task_service
+                        kg_task_service.pause_task(
+                            task_id,
+                            error_message=f"任务执行超时（{exec_duration:.0f}秒 > {TASK_EXECUTION_TIMEOUT}秒），已自动暂停。可能原因：AI服务响应慢、Neo4j写入卡死、网络问题等。"
+                        )
+                        logger.info(f"[KG-Worker] 已将超时任务 {task_id} 标记为暂停状态")
+                    except Exception as pause_err:
+                        logger.error(f"[KG-Worker] 标记超时任务失败: {pause_err}")
+
+                    # 不要重新抛出异常，让Worker继续处理下一个任务
+                    pass
+
             finally:
                 # 任务完成后，更新 Worker 状态为空闲（不删除记录）
                 register_worker_to_redis()  # 不传task_id，表示空闲状态
