@@ -108,7 +108,7 @@ def kg_task_worker_process(provider: str):
 
             success = redis_client.hmset(worker_key, worker_data)
             if success:
-                redis_client.expire(worker_key, 3600)  # 1小时过期（支持长时间任务）
+                redis_client.expire(worker_key, 7200)  # 2小时过期（支持长时间任务 + 足够的心跳缓冲）
                 logger.info(f"[KG-Worker] 注册成功: pid={os.getpid()}, task_id={task_id or '空闲'}, node={node_name}")
                 return True
             else:
@@ -146,7 +146,7 @@ def kg_task_worker_process(provider: str):
 
                     # 修复：即使暂停状态下也要定期更新心跳，避免 Redis key 过期
                     heartbeat_counter += 1
-                    if heartbeat_counter % 20 == 0:  # 每 100 秒左右更新一次心跳（20次 * 5秒）
+                    if heartbeat_counter % 10 == 0:  # 每 50 秒左右更新一次心跳（10次 * 5秒）
                         success = register_worker_to_redis()
                         if success:
                             logger.debug(f"[KG-Worker] 暂停状态心跳更新成功: provider={provider}, pid={os.getpid()}")
@@ -167,12 +167,12 @@ def kg_task_worker_process(provider: str):
 
             item = brpop_task(provider, timeout=3)
             if not item:
-                # 无任务，定期更新心跳
+                # 无任务，定期更新心跳（增加频率确保 Redis key 不过期）
                 heartbeat_counter += 1
-                if heartbeat_counter % 20 == 0:  # 每60秒左右更新一次心跳 (20次 * 3秒)
+                if heartbeat_counter % 10 == 0:  # 每30秒左右更新一次心跳 (10次 * 3秒)
                     success = register_worker_to_redis()
                     if success:
-                        logger.info(f"[KG-Worker] 心跳更新成功: provider={provider}, pid={os.getpid()}, counter={heartbeat_counter}")
+                        logger.debug(f"[KG-Worker] 心跳更新成功: provider={provider}, pid={os.getpid()}, counter={heartbeat_counter}")
                     else:
                         logger.error(f"[KG-Worker] 心跳更新失败: provider={provider}, pid={os.getpid()}")
                 time.sleep(0.2)
