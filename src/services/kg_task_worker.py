@@ -256,16 +256,60 @@ def kg_task_worker_process(provider: str):
                     logger.error(f"[KG-Worker] 任务 {task_id} 执行超时！已运行: {exec_duration:.1f}秒, 超时阈值: {TASK_EXECUTION_TIMEOUT}秒")
                     logger.error(f"[KG-Worker] 超时详情: {te}")
 
-                    # 将任务标记为暂停状态，记录超时错误
+                    # 将任务重新入队到其他Provider，而不是暂停
                     try:
-                        from src.services.knowledge_graph_task_service import kg_task_service
-                        kg_task_service.pause_task(
-                            task_id,
-                            error_message=f"任务执行超时（{exec_duration:.0f}秒 > {TASK_EXECUTION_TIMEOUT}秒），已自动暂停。可能原因：AI服务响应慢、Neo4j写入卡死、网络问题等。"
-                        )
-                        logger.info(f"[KG-Worker] 已将超时任务 {task_id} 标记为暂停状态")
-                    except Exception as pause_err:
-                        logger.error(f"[KG-Worker] 标记超时任务失败: {pause_err}")
+                        from .kg_task_queue_service import enqueue_task
+                        from src.models.database import db_manager, KnowledgeGraphTask
+
+                        # 获取任务信息
+                        with db_manager.get_session() as session:
+                            task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
+                            if task and task.use_ai:
+                                # 选择一个新的Provider（排除当前超时的Provider）
+                                active_providers = _list_active_providers()
+                                available_providers = [p for p in active_providers if p != provider and p != 'rules']
+
+                                if available_providers:
+                                    # 选择第一个可用的Provider
+                                    # TODO: 可以改进为选择负载最低的Provider
+                                    new_provider = available_providers[0]
+
+                                    # 重新入队
+                                    if enqueue_task(task_id, new_provider):
+                                        logger.info(f"[KG-Worker] 超时任务 {task_id} 已重新入队到 Provider: {new_provider}")
+
+                                        # 更新任务错误信息（但不暂停）
+                                        task.error_message = f"任务在 Provider '{provider}' 上执行超时（{exec_duration:.0f}秒），已自动重新分配到 '{new_provider}'"
+                                        session.commit()
+                                    else:
+                                        logger.error(f"[KG-Worker] 超时任务 {task_id} 重新入队失败")
+                                        # 入队失败，记录错误但不暂停任务
+                                        task.error_message = f"任务执行超时（{exec_duration:.0f}秒），重新入队失败"
+                                        session.commit()
+                                else:
+                                    # 没有其他可用Provider，将任务重新入队到原Provider
+                                    logger.warning(f"[KG-Worker] 没有其他可用Provider，将超时任务 {task_id} 重新入队到原Provider: {provider}")
+                                    if enqueue_task(task_id, provider):
+                                        logger.info(f"[KG-Worker] 超时任务 {task_id} 已重新入队（同一Provider）")
+                                        task.error_message = f"任务执行超时（{exec_duration:.0f}秒），已重新入队等待重试"
+                                        session.commit()
+                            elif task and not task.use_ai:
+                                # 规则引擎任务超时，重新入队到rules
+                                if enqueue_task(task_id, 'rules'):
+                                    logger.info(f"[KG-Worker] 超时的规则引擎任务 {task_id} 已重新入队")
+
+                    except Exception as requeue_err:
+                        logger.error(f"[KG-Worker] 处理超时任务重新入队失败: {requeue_err}")
+                        # 如果重新入队失败，尝试暂停任务作为后备方案
+                        try:
+                            from src.services.knowledge_graph_task_service import kg_task_service
+                            kg_task_service.pause_task(
+                                task_id,
+                                error_message=f"任务执行超时（{exec_duration:.0f}秒 > {TASK_EXECUTION_TIMEOUT}秒），重新入队失败，已自动暂停"
+                            )
+                            logger.info(f"[KG-Worker] 已将超时任务 {task_id} 标记为暂停状态（后备方案）")
+                        except Exception as pause_err:
+                            logger.error(f"[KG-Worker] 标记超时任务失败: {pause_err}")
 
                     # 不要重新抛出异常，让Worker继续处理下一个任务
                     pass
