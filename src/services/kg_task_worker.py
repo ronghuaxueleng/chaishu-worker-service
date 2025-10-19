@@ -219,13 +219,9 @@ def _list_active_providers() -> List[str]:
     try:
         from src.models.database import db_manager, AIProvider
         with db_manager.get_session() as session:
-            try:
-                rows = session.query(AIProvider.name).filter_by(is_active=True).all()
-                providers = [name.lower() for (name,) in rows]
-                return providers
-            except Exception as e:
-                session.rollback()
-                raise
+            rows = session.query(AIProvider.name).filter_by(is_active=True).all()
+            providers = [name for (name,) in rows]
+            return providers
     except Exception as e:
         logger.error(f"加载 AIProvider 列表失败: {e}")
         return []
@@ -248,7 +244,7 @@ def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: 
 
         if providers is None:
             providers = _list_active_providers()
-        providers = [p.strip().lower() for p in (providers or []) if p]
+        providers = [p.strip() for p in (providers or []) if p]
         if include_rules and 'rules' not in providers:
             providers.append('rules')
 
@@ -260,23 +256,37 @@ def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: 
 
         # 过滤掉已存在且存活的 provider（按当前进程名判断）
         existing = {}  # provider -> count
-        # 同时清理已死亡的进程
+        # 同时清理已死亡的进程和不在数据库中的进程
         alive_processes = []
+        terminated_processes = []
         for p in _worker_processes:
             if p.is_alive():
-                alive_processes.append(p)
                 # 进程名格式: KGTaskWorker-{provider}-{i}
                 # provider名称可能包含连字符，所以要从开头去掉"KGTaskWorker-"，从结尾去掉"-{i}"
                 name = p.name or ''
+                provider_name = None
                 if name.startswith('KGTaskWorker-'):
                     # 去掉前缀
                     provider_part = name[len('KGTaskWorker-'):]
                     # 去掉最后的序号部分 "-1", "-2" 等
                     if '-' in provider_part:
-                        provider = '-'.join(provider_part.split('-')[:-1])
+                        provider_name = '-'.join(provider_part.split('-')[:-1])
                     else:
-                        provider = provider_part
-                    existing[provider] = existing.get(provider, 0) + 1
+                        provider_name = provider_part
+
+                # 检查该 provider 是否在激活列表中
+                if provider_name and provider_name not in providers:
+                    # 终止不在数据库中的 Worker 进程
+                    logger.warning(f"[KG-Worker] 终止已删除服务商的 Worker: provider={provider_name}, pid={p.pid}")
+                    try:
+                        p.terminate()
+                        terminated_processes.append(p)
+                    except Exception as e:
+                        logger.error(f"[KG-Worker] 终止进程失败 (pid={p.pid}): {e}")
+                else:
+                    alive_processes.append(p)
+                    if provider_name:
+                        existing[provider_name] = existing.get(provider_name, 0) + 1
 
         # 更新进程列表，只保留存活的进程
         _worker_processes.clear()
@@ -502,13 +512,9 @@ def get_worker_stats() -> dict:
                                 try:
                                     from src.models.database import db_manager, KnowledgeGraphTask
                                     with db_manager.get_session() as session:
-                                        try:
-                                            task = session.query(KnowledgeGraphTask.task_name).filter_by(id=task_id).first()
-                                            if task:
-                                                task_name = task.task_name
-                                        except Exception as e:
-                                            session.rollback()
-                                            raise
+                                        task = session.query(KnowledgeGraphTask.task_name).filter_by(id=task_id).first()
+                                        if task:
+                                            task_name = task.task_name
                                 except Exception:
                                     pass
 
@@ -559,7 +565,7 @@ def start_workers_for_providers(providers: List[str], per_provider_processes: in
         return {'started': [], 'skipped': [], 'processes': 0}
 
     # 标准化
-    providers = [p.strip().lower() for p in providers if p]
+    providers = [p.strip() for p in providers if p]
 
     # 当前已有的 provider
     existing = set()
@@ -691,12 +697,11 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                             session.commit()
                             remaining = len(zombie_task_ids) - fixed_count
                             if remaining > 0:
-                                logger.info(f"[KG-WorkerGuard] 本次修复 {fixed_count} 个僵尸任务，剩余 {remaining} 个将在下次检查时处理")
+                                logger.info(f"[KG-WorkerGuard] 本次修复 {fixed_count} 个僵尸任务，剩余 {remaining} 个将在下���检查时处理")
                             else:
                                 logger.info(f"[KG-WorkerGuard] 已修复所有 {fixed_count} 个僵尸任务")
                         else:
                             logger.debug(f"[KG-WorkerGuard] 未发现僵尸任务（{len(running_task_ids)} 个 running 任务都在正常执行）")
-
                     except Exception as e:
                         session.rollback()
                         raise
@@ -715,8 +720,8 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                     try:
                         # 查询 created 状态的任务（限制每次最多启动 20 个）
                         created_tasks = session.query(KnowledgeGraphTask).filter_by(
-                            status='created'
-                        ).limit(20).all()
+                        status='created'
+                    ).limit(20).all()
 
                         if not created_tasks:
                             logger.debug("[KG-WorkerGuard] 没有待启动的 created 任务")
@@ -745,13 +750,156 @@ def start_auto_worker_guard(interval_seconds: int = 30):
 
                         if enqueued_count > 0:
                             logger.info(f"[KG-WorkerGuard] 成功入队 {enqueued_count} 个任务")
-
                     except Exception as e:
                         session.rollback()
                         raise
 
             except Exception as e:
                 logger.error(f"[KG-WorkerGuard] 自动启动任务失败: {e}", exc_info=True)
+
+        def _check_deleted_providers():
+            """检测已删除的 AI 服务商，停止相关 Worker 并重新入队任务"""
+            try:
+                from src.models.database import db_manager, AIProvider
+                from src.utils.redis_client import get_redis_client
+                from src.services.kg_task_queue_service import enqueue_task
+                from src.api.kg_task_routes import _choose_provider_for_ai_task
+
+                redis_client = get_redis_client()
+                if not redis_client:
+                    logger.warning("[KG-WorkerGuard] Redis 未连接，跳过删除服务商检测")
+                    return
+
+                # 1. 获取数据库中所有激活的 AI 服务商
+                with db_manager.get_session() as session:
+                    active_providers = session.query(AIProvider.name).filter_by(is_active=True).all()
+                    active_provider_names = {name for (name,) in active_providers}
+                    # 添加 rules 到白名单
+                    active_provider_names.add('rules')
+
+                # 2. 获取所有 Worker 注册信息
+                worker_keys = redis_client.keys('kg:worker:*')
+                deleted_provider_workers = {}  # {provider: [(pid, task_id), ...]}
+
+                for key in worker_keys:
+                    try:
+                        key_str = key.decode() if isinstance(key, bytes) else key
+                        pid = int(key_str.replace('kg:worker:', ''))
+
+                        worker_info = redis_client.hgetall(key)
+                        if not worker_info:
+                            continue
+
+                        # 解析 provider 和 task_id
+                        provider = None
+                        task_id = None
+
+                        for k, v in worker_info.items():
+                            k_str = k.decode() if isinstance(k, bytes) else k
+                            v_str = v.decode() if isinstance(v, bytes) else v
+
+                            if k_str == 'provider':
+                                provider = v_str
+                            elif k_str == 'task_id':
+                                task_id = v_str
+
+                        # 3. 检查 provider 是否已被删除
+                        if provider and provider not in active_provider_names:
+                            if provider not in deleted_provider_workers:
+                                deleted_provider_workers[provider] = []
+                            deleted_provider_workers[provider].append({
+                                'pid': pid,
+                                'task_id': task_id,
+                                'redis_key': key_str
+                            })
+
+                    except Exception as e:
+                        logger.error(f"[KG-WorkerGuard] 解析 Worker key {key} 失败: {e}")
+
+                # 4. 处理已删除服务商的 Worker
+                if deleted_provider_workers:
+                    logger.warning(f"[KG-WorkerGuard] 发现 {len(deleted_provider_workers)} 个已删除的服务商还有 Worker 在运行")
+
+                    total_workers = sum(len(workers) for workers in deleted_provider_workers.values())
+                    total_active_tasks = sum(1 for workers in deleted_provider_workers.values() for w in workers if w['task_id'])
+
+                    logger.info(f"[KG-WorkerGuard] 共 {total_workers} 个 Worker，其中 {total_active_tasks} 个正在执行任务")
+
+                    requeued_tasks = []
+
+                    for provider, workers in deleted_provider_workers.items():
+                        logger.info(f"[KG-WorkerGuard] 处理已删除服务商 '{provider}': {len(workers)} 个 Worker")
+
+                        for worker in workers:
+                            pid = worker['pid']
+                            task_id = worker['task_id']
+                            redis_key = worker['redis_key']
+
+                            # 5. 如果 Worker 正在执行任务，重新入队
+                            if task_id:
+                                try:
+                                    task_id_int = int(task_id)
+
+                                    # 选择新的 provider
+                                    new_provider = _choose_provider_for_ai_task()
+
+                                    # 重新入队
+                                    if enqueue_task(task_id_int, new_provider):
+                                        logger.info(f"[KG-WorkerGuard] 任务 {task_id_int} 已从 {provider} 重新入队到 {new_provider}")
+                                        requeued_tasks.append(task_id_int)
+                                    else:
+                                        logger.error(f"[KG-WorkerGuard] 任务 {task_id_int} 重新入队失败")
+
+                                except Exception as e:
+                                    logger.error(f"[KG-WorkerGuard] 重新入队任务 {task_id} 失败: {e}")
+
+                            # 6. 删除 Worker 的 Redis 注册
+                            try:
+                                redis_client.client.delete(redis_key)
+                                logger.debug(f"[KG-WorkerGuard] 已删除 Worker 注册: {redis_key} (PID: {pid})")
+                            except Exception as e:
+                                logger.error(f"[KG-WorkerGuard] 删除 Worker 注册失败 {redis_key}: {e}")
+
+                        # 7. 清理该 provider 的队列（如果有）
+                        try:
+                            queue_key = f"kg:ai_queue:{provider.lower()}"
+                            queue_len = redis_client.llen(queue_key)
+                            if queue_len > 0:
+                                logger.info(f"[KG-WorkerGuard] 服务商 '{provider}' 的队列中还有 {queue_len} 个任务，将重新分配")
+
+                                # 逐个取出并重新入队到活跃的 provider
+                                requeued_from_queue = 0
+                                while redis_client.llen(queue_key) > 0:
+                                    task_id_bytes = redis_client.client.rpop(queue_key)
+                                    if not task_id_bytes:
+                                        break
+
+                                    try:
+                                        task_id_int = int(task_id_bytes.decode() if isinstance(task_id_bytes, bytes) else task_id_bytes)
+                                        new_provider = _choose_provider_for_ai_task()
+
+                                        if enqueue_task(task_id_int, new_provider):
+                                            requeued_from_queue += 1
+                                            logger.debug(f"[KG-WorkerGuard] 队列任务 {task_id_int} 已从 {provider} 重新入队到 {new_provider}")
+                                        else:
+                                            logger.error(f"[KG-WorkerGuard] 队列任务 {task_id_int} 重新入队失败")
+
+                                    except Exception as e:
+                                        logger.error(f"[KG-WorkerGuard] 处理队列任务失败: {e}")
+
+                                if requeued_from_queue > 0:
+                                    logger.info(f"[KG-WorkerGuard] 从 '{provider}' 队列重新分配了 {requeued_from_queue} 个任务")
+
+                        except Exception as e:
+                            logger.error(f"[KG-WorkerGuard] 清理队列 {provider} 失败: {e}")
+
+                    if requeued_tasks:
+                        logger.info(f"[KG-WorkerGuard] 已删除服务商清理完成，共重新入队 {len(requeued_tasks)} 个活跃任务")
+                else:
+                    logger.debug("[KG-WorkerGuard] 未发现已删除服务商的 Worker")
+
+            except Exception as e:
+                logger.error(f"[KG-WorkerGuard] 检查已删除服务商失败: {e}", exc_info=True)
 
         def _loop():
             per = _env_workers_per_provider(default=1)
@@ -760,6 +908,10 @@ def start_auto_worker_guard(interval_seconds: int = 30):
             # 启动时立即执行一次僵尸任务检查
             logger.info(f"[KG-WorkerGuard] 启动时检查僵尸任务...")
             _check_zombie_tasks()
+
+            # 启动时检查已删除的服务商
+            logger.info(f"[KG-WorkerGuard] 启动时检查已删除的服务商...")
+            _check_deleted_providers()
 
             # 启动时自动入队 created 任务
             logger.info(f"[KG-WorkerGuard] 启动时检查待启动任务...")
@@ -771,6 +923,10 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                     loop_count += 1
                     # 该函数具备去重能力：仅为缺失的provider拉起进程
                     start_kg_task_workers(per_provider_processes=per)
+
+                    # 每2次循环（约1分钟，假设interval=30s）检查已删除的服务商
+                    if loop_count % 2 == 0:
+                        _check_deleted_providers()
 
                     # 每5次循环（约2.5分钟，假设interval=30s）自动启动 created 任务
                     if loop_count % 5 == 0:
