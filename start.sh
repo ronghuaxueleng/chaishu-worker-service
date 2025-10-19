@@ -17,12 +17,15 @@ echo -e "${GREEN}╚════════════════════
 echo
 
 # 检查 Python
-if ! command -v python &> /dev/null && ! command -v python3 &> /dev/null; then
+if command -v python3 &> /dev/null; then
+    PYTHON_CMD=python3
+elif command -v python &> /dev/null; then
+    PYTHON_CMD=python
+else
     echo -e "${RED}错误: 未找到 Python${NC}"
     exit 1
 fi
 
-PYTHON_CMD=$(command -v python3 || command -v python)
 echo -e "${GREEN}✓${NC} Python: $($PYTHON_CMD --version)"
 
 # 检查 .env 文件
@@ -73,25 +76,6 @@ if [ ${#MISSING_VARS[@]} -ne 0 ]; then
     echo
     echo "请在 .env 文件中配置这些变量"
     exit 1
-fi
-
-# 检查依赖
-if [ ! -d "venv" ]; then
-    echo -e "${YELLOW}⚠${NC} 未找到虚拟环境"
-    read -p "是否创建虚拟环境? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${GREEN}→${NC} 创建虚拟环境..."
-        $PYTHON_CMD -m venv venv
-        echo -e "${GREEN}✓${NC} 虚拟环境创建完成"
-    fi
-fi
-
-# 激活虚拟环境
-if [ -d "venv" ]; then
-    echo -e "${GREEN}→${NC} 激活虚拟环境..."
-    source venv/bin/activate || . venv/bin/activate
-    echo -e "${GREEN}✓${NC} 虚拟环境已激活"
 fi
 
 # 检查依赖包
