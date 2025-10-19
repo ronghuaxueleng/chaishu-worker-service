@@ -143,6 +143,16 @@ def kg_task_worker_process(provider: str):
                         st['next_log'] = now + 120
                     st['suspended'] = True
                     _suspend_log_state[provider or 'unknown'] = st
+
+                    # 修复：即使暂停状态下也要定期更新心跳，避免 Redis key 过期
+                    heartbeat_counter += 1
+                    if heartbeat_counter % 20 == 0:  # 每 100 秒左右更新一次心跳（20次 * 5秒）
+                        success = register_worker_to_redis()
+                        if success:
+                            logger.debug(f"[KG-Worker] 暂停状态心跳更新成功: provider={provider}, pid={os.getpid()}")
+                        else:
+                            logger.error(f"[KG-Worker] 暂停状态心跳更新失败: provider={provider}, pid={os.getpid()}")
+
                     time.sleep(5)
                     continue
                 else:
