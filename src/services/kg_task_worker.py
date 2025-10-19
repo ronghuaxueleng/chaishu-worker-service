@@ -339,6 +339,99 @@ def _list_active_providers() -> List[str]:
         return []
 
 
+def reassign_provider_active_tasks(suspended_provider: str) -> int:
+    """将被暂停Provider的所有活跃任务重新分配到其他Provider
+
+    当某个Provider被暂停时调用此函数，将该Provider的Worker正在处理的
+    所有任务重新入队到其他可用的Provider。
+
+    Args:
+        suspended_provider: 被暂停的Provider名称
+
+    Returns:
+        重新分配的任务数量
+    """
+    if not suspended_provider:
+        return 0
+
+    try:
+        from src.utils.redis_client import get_redis_client
+        from .kg_task_queue_service import enqueue_task
+
+        redis_client = get_redis_client()
+        if not redis_client:
+            logger.error(f"[Provider-Suspend] 无法获取Redis客户端，无法重新分配任务")
+            return 0
+
+        # 1. 获取该Provider的所有Worker
+        worker_keys = redis_client.keys('kg:worker:*')
+        active_tasks = []
+
+        for key in worker_keys:
+            try:
+                worker_info = redis_client.hgetall(key)
+                if not worker_info:
+                    continue
+
+                provider = worker_info.get('provider')
+                if isinstance(provider, bytes):
+                    provider = provider.decode()
+
+                # 只处理被暂停Provider的Worker
+                if provider != suspended_provider:
+                    continue
+
+                # 获取Worker正在处理的任务
+                task_id = worker_info.get('task_id')
+                if task_id:
+                    try:
+                        task_id = int(task_id)
+                        active_tasks.append(task_id)
+                    except (ValueError, TypeError):
+                        pass
+
+            except Exception as e:
+                logger.warning(f"[Provider-Suspend] 解析Worker信息失败: {e}")
+                continue
+
+        if not active_tasks:
+            logger.info(f"[Provider-Suspend] Provider '{suspended_provider}' 没有活跃任务需要重新分配")
+            return 0
+
+        logger.warning(f"[Provider-Suspend] Provider '{suspended_provider}' 被暂停，发现 {len(active_tasks)} 个活跃任务需要重新分配")
+
+        # 2. 获取其他可用的Provider
+        available_providers = _list_active_providers()
+        available_providers = [p for p in available_providers if p != suspended_provider and p != 'rules']
+
+        if not available_providers:
+            logger.error(f"[Provider-Suspend] 没有其他可用Provider，无法重新分配任务")
+            return 0
+
+        # 3. 重新分配任务
+        reassigned_count = 0
+        for task_id in active_tasks:
+            try:
+                # 选择第一个可用的Provider（可以改进为负载均衡）
+                target_provider = available_providers[reassigned_count % len(available_providers)]
+
+                if enqueue_task(task_id, target_provider):
+                    logger.info(f"[Provider-Suspend] 任务 {task_id} 已从 '{suspended_provider}' 重新分配到 '{target_provider}'")
+                    reassigned_count += 1
+                else:
+                    logger.error(f"[Provider-Suspend] 任务 {task_id} 重新入队失败")
+
+            except Exception as e:
+                logger.error(f"[Provider-Suspend] 重新分配任务 {task_id} 失败: {e}")
+
+        logger.info(f"[Provider-Suspend] 成功重新分配 {reassigned_count}/{len(active_tasks)} 个任务")
+        return reassigned_count
+
+    except Exception as e:
+        logger.error(f"[Provider-Suspend] 重新分配Provider任务失败: {e}", exc_info=True)
+        return 0
+
+
 def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: bool = True, per_provider_processes: int = 1):
     """启动 Provider Worker 进程（带严格保护机制）
 

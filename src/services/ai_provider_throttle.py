@@ -88,8 +88,11 @@ def reset_failures(provider_name: str) -> None:
 
 
 def _set_suspended(provider_name: str, seconds: int = SUSPEND_SECONDS) -> None:
+    """暂停Provider并重新分配其活跃任务"""
     if not provider_name:
         return
+
+    # 1. 先设置暂停状态
     try:
         if get_redis_client:
             rc = get_redis_client()
@@ -97,10 +100,22 @@ def _set_suspended(provider_name: str, seconds: int = SUSPEND_SECONDS) -> None:
                 key = f"ai:provider:suspend:{provider_name}"
                 # 值无所谓，设置过期时间即可
                 rc.set(key, {"until": _now() + seconds}, expire=seconds)
-                return
+            else:
+                raise RuntimeError("redis not connected")
+        else:
+            raise RuntimeError("redis unavailable")
     except Exception:
-        pass
-    _suspended_until[provider_name] = _now() + seconds
+        _suspended_until[provider_name] = _now() + seconds
+
+    # 2. 重新分配该Provider的活跃任务到其他Provider
+    try:
+        from src.services.kg_task_worker import reassign_provider_active_tasks
+        reassigned = reassign_provider_active_tasks(provider_name)
+        if reassigned > 0:
+            logger.info(f"Provider '{provider_name}' 被暂停后，已重新分配 {reassigned} 个活跃任务")
+    except Exception as e:
+        logger.error(f"重新分配Provider '{provider_name}' 的活跃任务失败: {e}")
+        # 不抛出异常，因为暂停操作本身已经成功
 
 
 def increment_failure(provider_name: str, max_failures: int = MAX_CONSECUTIVE_FAILURES,
