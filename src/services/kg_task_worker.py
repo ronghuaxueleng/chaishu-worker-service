@@ -584,7 +584,7 @@ def get_worker_stats() -> dict:
           }
         }
     """
-    from .kg_task_queue_service import queue_length
+    from .kg_task_queue_service import get_active_batch_length
     from src.utils.redis_client import get_redis_client
     import psutil
 
@@ -765,10 +765,10 @@ def get_worker_stats() -> dict:
     except Exception as e:
         logger.warning(f"从Redis读取Worker状态失败: {e}")
 
-    # 融合队列长度
+    # 融合队列长度（使用活跃批次长度，而不是旧的 kg:ai_queue）
     for provider in list(prov_map.keys()):
         try:
-            qlen = queue_length(provider)
+            qlen = get_active_batch_length(provider)
         except Exception:
             qlen = 0
         prov_map[provider]['queue_length'] = qlen
