@@ -677,7 +677,9 @@ class OpenAICompatibleService(BaseAIService):
                 data["max_tokens"] = kwargs['max_tokens']
 
             # 根据是否全局步骤调整超时时间
-            timeout = 120 if is_global else 120  # 默认都设置为2分钟
+            # 降低timeout以配合外层的signal.alarm超时机制
+            # 单个AI调用最多60秒，避免长时间阻塞
+            timeout = 60 if is_global else 60
 
             url = f"{self.base_url}/v1/chat/completions"
 
@@ -685,6 +687,8 @@ class OpenAICompatibleService(BaseAIService):
             logger.info(f"[{self.provider_name}] OpenAI兼容API请求 - URL: {url}, Model: {model}, Prompt长度: {len(prompt)}")
 
             # 使用同步requests
+            # 注意：requests的timeout分为(connect_timeout, read_timeout)
+            # 这里使用单个值，表示总超时时间
             response = requests.post(url, headers=headers, json=data, timeout=timeout)
             
             if response.status_code == 200:

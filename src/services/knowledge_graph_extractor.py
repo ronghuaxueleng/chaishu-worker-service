@@ -750,6 +750,15 @@ class KnowledgeGraphExtractor:
                                 # 即使状态更新失败，也继续处理下一个章节
 
                         except Exception as e:
+                            # 重要：如果是超时异常，需要立即重新抛出，不能继续处理
+                            # 导入在这里避免循环依赖
+                            from ..services.kg_task_worker import TaskTimeoutError
+                            if isinstance(e, TaskTimeoutError):
+                                logger.error(f"✗ 章节处理超时 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}")
+                                # 回退当前章节状态为pending，允许重试
+                                kg_task_service.update_chapter_status(task_id, chapter.id, 'pending')
+                                raise  # 重新抛出，让外层的超时处理逻辑接管
+
                             logger.error(f"✗ 处理章节异常 - 小说: {novel.title}, 章节号 {chapter.chapter_number} (ID {chapter.id}) 标题: {chapter.title}, 错误: {e}")
                             kg_task_service.update_chapter_status(
                                 task_id, chapter.id, 'failed', str(e)
