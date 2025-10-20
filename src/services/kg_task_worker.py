@@ -1123,6 +1123,88 @@ def start_auto_worker_guard(interval_seconds: int = 30):
             except Exception as e:
                 logger.error(f"[KG-WorkerGuard] 检查已删除服务商失败: {e}", exc_info=True)
 
+        def _check_long_running_tasks():
+            """检查长时间运行的任务（超过5分钟），自动停止并重新入队"""
+            try:
+                from src.utils.redis_client import get_redis_client
+                from src.models.database import db_manager, KnowledgeGraphTask
+                from .kg_task_queue_service import enqueue_to_main_queue
+
+                redis_client = get_redis_client()
+                if not redis_client:
+                    logger.debug("[KG-WorkerGuard] Redis 未连接，跳过长时间运行检查")
+                    return
+
+                # 获取所有 Worker 的状态
+                worker_keys = redis_client.keys('kg:worker:*')
+                long_running_count = 0
+                timeout_threshold = 300  # 5分钟 = 300秒
+
+                for key in worker_keys:
+                    try:
+                        key_str = key.decode() if isinstance(key, bytes) else key
+                        pid = int(key_str.replace('kg:worker:', ''))
+
+                        worker_info = redis_client.hgetall(key)
+                        if not worker_info:
+                            continue
+
+                        # 解析任务信息
+                        task_id = worker_info.get('task_id')
+                        start_time = worker_info.get('start_time')
+                        provider = worker_info.get('provider')
+
+                        if not task_id or not start_time:
+                            continue  # 没有任务在执行
+
+                        try:
+                            task_id = int(task_id)
+                            start_time_float = float(start_time)
+                            running_time = time.time() - start_time_float
+
+                            # 检查是否超时
+                            if running_time > timeout_threshold:
+                                long_running_count += 1
+                                logger.warning(
+                                    f"[KG-WorkerGuard] 发现长时间运行任务: "
+                                    f"Task {task_id}, PID {pid}, Provider {provider}, "
+                                    f"运行时间: {running_time:.0f}秒 (>{timeout_threshold}秒)"
+                                )
+
+                                # 将任务状态改为 pending 并重新入队
+                                with db_manager.get_session() as session:
+                                    task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
+                                    if task and task.status == 'running':
+                                        task.status = 'pending'
+                                        task.error_message = f"任务运行时间过长（{running_time/60:.1f}分钟），已自动停止并重新入队"
+                                        session.commit()
+
+                                        # 重新入队到主队列
+                                        if enqueue_to_main_queue(task_id, provider or 'rules'):
+                                            logger.info(
+                                                f"[KG-WorkerGuard] 任务 {task_id} 已重新入队到主队列: {provider}"
+                                            )
+                                        else:
+                                            logger.error(f"[KG-WorkerGuard] 任务 {task_id} 重新入队失败")
+
+                                # 删除 Worker 记录（让 Worker 自然停止）
+                                redis_client.delete(key_str)
+                                logger.info(f"[KG-WorkerGuard] 已删除长时间运行的 Worker 记录: PID {pid}")
+
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"[KG-WorkerGuard] 解析任务时间失败: {e}")
+                            continue
+
+                    except Exception as e:
+                        logger.error(f"[KG-WorkerGuard] 处理 Worker {key} 时出错: {e}")
+                        continue
+
+                if long_running_count > 0:
+                    logger.info(f"[KG-WorkerGuard] 已处理 {long_running_count} 个长时间运行任务")
+
+            except Exception as e:
+                logger.error(f"[KG-WorkerGuard] 检查长时间运行任务失败: {e}", exc_info=True)
+
         def _loop():
             per = _env_workers_per_provider(default=1)
             logger.info(f"[KG-WorkerGuard] 启动，周期={interval_seconds}s，每Provider进程数={per}")
@@ -1145,6 +1227,9 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                     loop_count += 1
                     # 该函数具备去重能力：仅为缺失的provider拉起进程
                     start_kg_task_workers(per_provider_processes=per)
+
+                    # 每次循环都检查长时间运行的任务（5分钟超时）
+                    _check_long_running_tasks()
 
                     # 每2次循环（约1分钟，假设interval=30s）检查已删除的服务商
                     if loop_count % 2 == 0:
