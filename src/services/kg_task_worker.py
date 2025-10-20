@@ -274,25 +274,29 @@ def kg_task_worker_process(provider: str):
                                     # TODO: 可以改进为选择负载最低的Provider
                                     new_provider = available_providers[0]
 
+                                    # 重新入队前先将任务状态改回pending，让新Worker能够启动它
+                                    task.status = 'pending'
+                                    task.error_message = f"任务在 Provider '{provider}' 上执行超时（{exec_duration:.0f}秒），已自动重新分配到 '{new_provider}'"
+                                    session.commit()
+
                                     # 重新入队
                                     if enqueue_task(task_id, new_provider):
-                                        logger.info(f"[KG-Worker] 超时任务 {task_id} 已重新入队到 Provider: {new_provider}")
-
-                                        # 更新任务错误信息（但不暂停）
-                                        task.error_message = f"任务在 Provider '{provider}' 上执行超时（{exec_duration:.0f}秒），已自动重新分配到 '{new_provider}'"
-                                        session.commit()
+                                        logger.info(f"[KG-Worker] 超时任务 {task_id} 状态已改为pending并重新入队到 Provider: {new_provider}")
                                     else:
-                                        logger.error(f"[KG-Worker] 超时任务 {task_id} 重新入队失败")
-                                        # 入队失败，记录错误但不暂停任务
-                                        task.error_message = f"任务执行超时（{exec_duration:.0f}秒），重新入队失败"
-                                        session.commit()
+                                        logger.error(f"[KG-Worker] 超时任务 {task_id} 状态已改为pending但重新入队失败")
+                                        # 入队失败，但状态已经是pending了，可以手动重试
+
                                 else:
                                     # 没有其他可用Provider，将任务重新入队到原Provider
                                     logger.warning(f"[KG-Worker] 没有其他可用Provider，将超时任务 {task_id} 重新入队到原Provider: {provider}")
+
+                                    # 同样需要先改状态
+                                    task.status = 'pending'
+                                    task.error_message = f"任务执行超时（{exec_duration:.0f}秒），已重新入队等待重试"
+                                    session.commit()
+
                                     if enqueue_task(task_id, provider):
-                                        logger.info(f"[KG-Worker] 超时任务 {task_id} 已重新入队（同一Provider）")
-                                        task.error_message = f"任务执行超时（{exec_duration:.0f}秒），已重新入队等待重试"
-                                        session.commit()
+                                        logger.info(f"[KG-Worker] 超时任务 {task_id} 状态已改为pending并重新入队（同一Provider）")
                             elif task and not task.use_ai:
                                 # 规则引擎任务超时，重新入队到rules
                                 if enqueue_task(task_id, 'rules'):
@@ -410,11 +414,23 @@ def reassign_provider_active_tasks(suspended_provider: str) -> int:
 
         # 3. 重新分配任务
         reassigned_count = 0
+        from src.models.database import db_manager, KnowledgeGraphTask
+
         for task_id in active_tasks:
             try:
                 # 选择第一个可用的Provider（可以改进为负载均衡）
                 target_provider = available_providers[reassigned_count % len(available_providers)]
 
+                # 先将任务状态改回pending，让新Worker能够启动它
+                with db_manager.get_session() as session:
+                    task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
+                    if task:
+                        task.status = 'pending'
+                        task.error_message = f"Provider '{suspended_provider}' 被暂停，任务已重新分配到 '{target_provider}'"
+                        session.commit()
+                        logger.info(f"[Provider-Suspend] 任务 {task_id} 状态已改为pending")
+
+                # 重新入队
                 if enqueue_task(task_id, target_provider):
                     logger.info(f"[Provider-Suspend] 任务 {task_id} 已从 '{suspended_provider}' 重新分配到 '{target_provider}'")
                     reassigned_count += 1
