@@ -10,7 +10,7 @@ import time
 import signal
 from typing import List, Optional
 
-from .kg_task_queue_service import brpop_task
+from .kg_task_queue_service import brpop_from_active_batch
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +203,7 @@ def kg_task_worker_process(provider: str):
             except Exception:
                 pass
 
-            item = brpop_task(provider, timeout=3)
+            item = brpop_from_active_batch(provider, timeout=3)
             if not item:
                 # 无任务，定期更新心跳（增加频率确保 Redis key 不过期）
                 heartbeat_counter += 1
@@ -931,21 +931,22 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                 logger.error(f"[KG-WorkerGuard] 检查僵尸任务失败: {e}", exc_info=True)
 
         def _auto_start_created_tasks():
-            """自动启动 created 状态的任务（限流）"""
+            """自动启动待处理任务（排除 running 和 completed）"""
             try:
                 from src.models.database import db_manager, KnowledgeGraphTask
-                from src.services.kg_task_queue_service import enqueue_task
+                from src.services.kg_task_queue_service import enqueue_to_main_queue
                 from src.api.kg_task_routes import _choose_provider_for_ai_task
 
                 with db_manager.get_session() as session:
                     try:
-                        # 查询 created 状态的任务（限制每次最多启动 20 个）
-                        created_tasks = session.query(KnowledgeGraphTask).filter_by(
-                        status='created'
+                        # 查询除了 running 和 completed 之外的任务（限制每次最多启动 20 个）
+                        # 可入队状态: created, pending, paused, failed
+                        created_tasks = session.query(KnowledgeGraphTask).filter(
+                        ~KnowledgeGraphTask.status.in_(['running', 'completed'])
                     ).limit(20).all()
 
                         if not created_tasks:
-                            logger.debug("[KG-WorkerGuard] 没有待启动的 created 任务")
+                            logger.debug("[KG-WorkerGuard] 没有待启动的任务")
                             return
 
                         logger.info(f"[KG-WorkerGuard] 发现 {len(created_tasks)} 个待启动任务，开始自动入队...")
@@ -959,8 +960,8 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                                 else:
                                     provider = 'rules'
 
-                                # 将任务入队
-                                if enqueue_task(task.id, provider):
+                                # 将任务入队到主队列（批次调度器会自动加载）
+                                if enqueue_to_main_queue(task.id, provider):
                                     enqueued_count += 1
                                     logger.info(f"[KG-WorkerGuard] 任务 {task.id} ({task.task_name}) 已入队到 {provider}")
                                 else:
