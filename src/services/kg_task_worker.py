@@ -398,13 +398,35 @@ def reassign_provider_active_tasks(suspended_provider: str) -> int:
                 logger.warning(f"[Provider-Suspend] 解析Worker信息失败: {e}")
                 continue
 
+        # 2. 【修复】处理活跃批次队列中等待的任务（之前被遗忘）
+        from .kg_task_queue_service import get_active_batch_queue_key
+
+        active_batch_key = get_active_batch_queue_key(suspended_provider)
+        batch_tasks_count = 0
+
+        # 将活跃批次中的所有任务取出并加入待重新分配列表
+        while True:
+            task_item = redis_client.lpop(active_batch_key)
+            if not task_item:
+                break
+            try:
+                task_id = int(task_item.get('task_id'))
+                active_tasks.append(task_id)
+                batch_tasks_count += 1
+                logger.info(f"[Provider-Suspend] 从活跃批次取出任务: {task_id}")
+            except Exception as e:
+                logger.error(f"[Provider-Suspend] 解析活跃批次任务失败: {e}")
+
+        if batch_tasks_count > 0:
+            logger.warning(f"[Provider-Suspend] 从活跃批次队列取出 {batch_tasks_count} 个等待任务")
+
         if not active_tasks:
             logger.info(f"[Provider-Suspend] Provider '{suspended_provider}' 没有活跃任务需要重新分配")
             return 0
 
         logger.warning(f"[Provider-Suspend] Provider '{suspended_provider}' 被暂停，发现 {len(active_tasks)} 个活跃任务需要重新分配")
 
-        # 2. 获取其他可用的Provider
+        # 3. 获取其他可用的Provider
         available_providers = _list_active_providers()
         available_providers = [p for p in available_providers if p != suspended_provider and p != 'rules']
 
@@ -412,7 +434,7 @@ def reassign_provider_active_tasks(suspended_provider: str) -> int:
             logger.error(f"[Provider-Suspend] 没有其他可用Provider，无法重新分配任务")
             return 0
 
-        # 3. 重新分配任务
+        # 4. 重新分配任务
         reassigned_count = 0
         from src.models.database import db_manager, KnowledgeGraphTask
 
@@ -475,51 +497,59 @@ def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: 
 
         logger.info(f"[KG-Worker] 启动provider进程: {providers}, per={per_provider_processes}")
 
-        # 过滤掉已存在且存活的 provider（按当前进程名判断）
+        # 【修复】从 Redis 读取实际运行的 Worker，而不是依赖内存列表
         existing = {}  # provider -> count
-        # 同时清理已死亡的进程和不在数据库中的进程
-        alive_processes = []
-        terminated_processes = []
-        for p in _worker_processes:
-            if p.is_alive():
-                # 进程名格式: KGTaskWorker-{provider}-{i}
-                # provider名称可能包含连字符，所以要从开头去掉"KGTaskWorker-"，从结尾去掉"-{i}"
-                name = p.name or ''
-                provider_name = None
-                if name.startswith('KGTaskWorker-'):
-                    # 去掉前缀
-                    provider_part = name[len('KGTaskWorker-'):]
-                    # 去掉最后的序号部分 "-1", "-2" 等
-                    if '-' in provider_part:
-                        provider_name = '-'.join(provider_part.split('-')[:-1])
-                    else:
-                        provider_name = provider_part
+        try:
+            from src.utils.redis_client import get_redis_client
+            redis_client = get_redis_client()
 
-                # 检查该 provider 是否在激活列表中
-                if provider_name and provider_name not in providers:
-                    # 终止不在数据库中的 Worker 进程
-                    logger.warning(f"[KG-Worker] 终止已删除服务商的 Worker: provider={provider_name}, pid={p.pid}")
+            if redis_client and redis_client.is_connected():
+                worker_keys = redis_client.keys('kg:worker:*')
+                logger.debug(f"[KG-Worker] 从 Redis 读取到 {len(worker_keys)} 个 Worker")
+
+                for key in worker_keys:
                     try:
-                        p.terminate()
-                        terminated_processes.append(p)
-                    except Exception as e:
-                        logger.error(f"[KG-Worker] 终止进程失败 (pid={p.pid}): {e}")
-                else:
-                    alive_processes.append(p)
-                    if provider_name:
-                        existing[provider_name] = existing.get(provider_name, 0) + 1
+                        worker_info = redis_client.hgetall(key)
+                        if not worker_info:
+                            continue
 
-        # 更新进程列表，只保留存活的进程
+                        provider = worker_info.get('provider')
+                        if provider:
+                            existing[provider] = existing.get(provider, 0) + 1
+                    except Exception as e:
+                        logger.debug(f"[KG-Worker] 解析 Worker key 失败: {e}")
+
+                logger.info(f"[KG-Worker] Redis 中的 Worker 分布: {dict(existing)}")
+            else:
+                logger.warning("[KG-Worker] Redis 未连接，将依赖内存进程列表")
+                # 降级方案：使用内存进程列表
+                for p in _worker_processes:
+                    if p.is_alive():
+                        name = p.name or ''
+                        if name.startswith('KGTaskWorker-'):
+                            provider_part = name[len('KGTaskWorker-'):]
+                            if '-' in provider_part:
+                                provider_name = '-'.join(provider_part.split('-')[:-1])
+                            else:
+                                provider_name = provider_part
+                            if provider_name:
+                                existing[provider_name] = existing.get(provider_name, 0) + 1
+        except Exception as e:
+            logger.error(f"[KG-Worker] 读取 Worker 状态失败: {e}")
+            existing = {}
+
+        # 清理内存中已死亡的进程
+        alive_processes = [p for p in _worker_processes if p.is_alive()]
         _worker_processes.clear()
         _worker_processes.extend(alive_processes)
 
-        # 检查总进程数限制
-        current_total = len(alive_processes)
+        # 检查总进程数限制（使用 Redis 中的实际数量）
+        current_total = sum(existing.values()) if existing else len(alive_processes)
         if current_total >= MAX_TOTAL_PROCESSES:
             logger.error(f"[KG-Worker] 已达到最大进程数限制 {MAX_TOTAL_PROCESSES}，拒绝创建新进程")
             return
 
-        logger.info(f"[KG-Worker] 当前活跃进程: {current_total}/{MAX_TOTAL_PROCESSES}")
+        logger.info(f"[KG-Worker] 当前活跃进程: {current_total}/{MAX_TOTAL_PROCESSES} (来自 Redis)")
 
         # 计算每个 provider 需要启动的进程数
         created_count = 0
@@ -918,7 +948,7 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                             session.commit()
                             remaining = len(zombie_task_ids) - fixed_count
                             if remaining > 0:
-                                logger.info(f"[KG-WorkerGuard] 本次修复 {fixed_count} 个僵尸任务，剩余 {remaining} 个将在下���检查时处理")
+                                logger.info(f"[KG-WorkerGuard] 本次修复 {fixed_count} 个僵尸任务，剩余 {remaining} 个将在下次检查时处理")
                             else:
                                 logger.info(f"[KG-WorkerGuard] 已修复所有 {fixed_count} 个僵尸任务")
                         else:
@@ -929,6 +959,89 @@ def start_auto_worker_guard(interval_seconds: int = 30):
 
             except Exception as e:
                 logger.error(f"[KG-WorkerGuard] 检查僵尸任务失败: {e}", exc_info=True)
+
+        def _check_long_running_tasks():
+            """检查长时间运行的任务（超过5分钟），自动停止并重新入队"""
+            try:
+                from src.utils.redis_client import get_redis_client
+                from src.models.database import db_manager, KnowledgeGraphTask
+                from .kg_task_queue_service import enqueue_to_main_queue
+
+                redis_client = get_redis_client()
+                if not redis_client:
+                    logger.debug("[KG-WorkerGuard] Redis 未连接，跳过长时间运行检查")
+                    return
+
+                # 获取所有 Worker 的状态
+                worker_keys = redis_client.keys('kg:worker:*')
+                long_running_count = 0
+                timeout_threshold = 300  # 5分钟 = 300秒
+
+                for key in worker_keys:
+                    try:
+                        key_str = key.decode() if isinstance(key, bytes) else key
+                        pid = int(key_str.replace('kg:worker:', ''))
+
+                        worker_info = redis_client.hgetall(key)
+                        if not worker_info:
+                            continue
+
+                        # 解析任务信息
+                        task_id = worker_info.get('task_id')
+                        start_time = worker_info.get('start_time')
+                        provider = worker_info.get('provider')
+
+                        if not task_id or not start_time:
+                            continue  # 没有任务在执行
+
+                        try:
+                            task_id = int(task_id)
+                            start_time_float = float(start_time)
+                            running_time = time.time() - start_time_float
+
+                            # 检查是否超时
+                            if running_time > timeout_threshold:
+                                long_running_count += 1
+                                logger.warning(
+                                    f"[KG-WorkerGuard] 发现长时间运行任务: "
+                                    f"Task {task_id}, PID {pid}, Provider {provider}, "
+                                    f"运行时间: {running_time:.0f}秒 (>{timeout_threshold}秒)"
+                                )
+
+                                # 将任务状态改为 pending 并重新入队
+                                with db_manager.get_session() as session:
+                                    task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
+                                    if task and task.status == 'running':
+                                        task.status = 'pending'
+                                        task.error_message = f"任务运行时间过长（{running_time/60:.1f}分钟），已自动停止并重新入队"
+                                        session.commit()
+
+                                        # 重新入队到主队列
+                                        if enqueue_to_main_queue(task_id, provider or 'rules'):
+                                            logger.info(
+                                                f"[KG-WorkerGuard] 任务 {task_id} 已重新入队到主队列: {provider}"
+                                            )
+                                        else:
+                                            logger.error(f"[KG-WorkerGuard] 任务 {task_id} 重新入队失败")
+
+                                # 删除 Worker 记录（让 Worker 自然停止）
+                                redis_client.delete(key_str)
+                                logger.info(f"[KG-WorkerGuard] 已删除长时间运行的 Worker 记录: PID {pid}")
+
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"[KG-WorkerGuard] 解析任务时间失败: {e}")
+                            continue
+
+                    except Exception as e:
+                        logger.error(f"[KG-WorkerGuard] 处理 Worker {key} 时出错: {e}")
+                        continue
+
+                if long_running_count > 0:
+                    logger.info(f"[KG-WorkerGuard] 已处理 {long_running_count} 个长时间运行任务")
+
+            except Exception as e:
+                logger.error(f"[KG-WorkerGuard] 检查长时间运行任务失败: {e}", exc_info=True)
+
 
         def _auto_start_created_tasks():
             """自动启动待处理任务（排除 running 和 completed）"""
@@ -1122,88 +1235,6 @@ def start_auto_worker_guard(interval_seconds: int = 30):
 
             except Exception as e:
                 logger.error(f"[KG-WorkerGuard] 检查已删除服务商失败: {e}", exc_info=True)
-
-        def _check_long_running_tasks():
-            """检查长时间运行的任务（超过5分钟），自动停止并重新入队"""
-            try:
-                from src.utils.redis_client import get_redis_client
-                from src.models.database import db_manager, KnowledgeGraphTask
-                from .kg_task_queue_service import enqueue_to_main_queue
-
-                redis_client = get_redis_client()
-                if not redis_client:
-                    logger.debug("[KG-WorkerGuard] Redis 未连接，跳过长时间运行检查")
-                    return
-
-                # 获取所有 Worker 的状态
-                worker_keys = redis_client.keys('kg:worker:*')
-                long_running_count = 0
-                timeout_threshold = 300  # 5分钟 = 300秒
-
-                for key in worker_keys:
-                    try:
-                        key_str = key.decode() if isinstance(key, bytes) else key
-                        pid = int(key_str.replace('kg:worker:', ''))
-
-                        worker_info = redis_client.hgetall(key)
-                        if not worker_info:
-                            continue
-
-                        # 解析任务信息
-                        task_id = worker_info.get('task_id')
-                        start_time = worker_info.get('start_time')
-                        provider = worker_info.get('provider')
-
-                        if not task_id or not start_time:
-                            continue  # 没有任务在执行
-
-                        try:
-                            task_id = int(task_id)
-                            start_time_float = float(start_time)
-                            running_time = time.time() - start_time_float
-
-                            # 检查是否超时
-                            if running_time > timeout_threshold:
-                                long_running_count += 1
-                                logger.warning(
-                                    f"[KG-WorkerGuard] 发现长时间运行任务: "
-                                    f"Task {task_id}, PID {pid}, Provider {provider}, "
-                                    f"运行时间: {running_time:.0f}秒 (>{timeout_threshold}秒)"
-                                )
-
-                                # 将任务状态改为 pending 并重新入队
-                                with db_manager.get_session() as session:
-                                    task = session.query(KnowledgeGraphTask).filter_by(id=task_id).first()
-                                    if task and task.status == 'running':
-                                        task.status = 'pending'
-                                        task.error_message = f"任务运行时间过长（{running_time/60:.1f}分钟），已自动停止并重新入队"
-                                        session.commit()
-
-                                        # 重新入队到主队列
-                                        if enqueue_to_main_queue(task_id, provider or 'rules'):
-                                            logger.info(
-                                                f"[KG-WorkerGuard] 任务 {task_id} 已重新入队到主队列: {provider}"
-                                            )
-                                        else:
-                                            logger.error(f"[KG-WorkerGuard] 任务 {task_id} 重新入队失败")
-
-                                # 删除 Worker 记录（让 Worker 自然停止）
-                                redis_client.delete(key_str)
-                                logger.info(f"[KG-WorkerGuard] 已删除长时间运行的 Worker 记录: PID {pid}")
-
-                        except (ValueError, TypeError) as e:
-                            logger.debug(f"[KG-WorkerGuard] 解析任务时间失败: {e}")
-                            continue
-
-                    except Exception as e:
-                        logger.error(f"[KG-WorkerGuard] 处理 Worker {key} 时出错: {e}")
-                        continue
-
-                if long_running_count > 0:
-                    logger.info(f"[KG-WorkerGuard] 已处理 {long_running_count} 个长时间运行任务")
-
-            except Exception as e:
-                logger.error(f"[KG-WorkerGuard] 检查长时间运行任务失败: {e}", exc_info=True)
 
         def _loop():
             per = _env_workers_per_provider(default=1)
