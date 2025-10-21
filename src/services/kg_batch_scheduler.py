@@ -58,6 +58,9 @@ def start_batch_scheduler():
     _scheduler.start()
     logger.info("✅ 批次调度器已启动 (检查间隔: %d秒, 批次大小: %d)", CHECK_INTERVAL, BATCH_SIZE)
 
+    # 将调度器状态写入 Redis（用于监控）
+    _update_scheduler_status(running=True)
+
     # 启动后立即执行一次初始化加载
     if not _scheduler_initialized:
         logger.info("[批次调度器] 执行初始化加载...")
@@ -130,6 +133,9 @@ def _check_and_load_batches():
         if not redis_client:
             logger.debug("[批次调度器] Redis未连接，等待...")
             return
+
+        # 更新调度器状态到 Redis（用于监控）
+        _update_scheduler_status(running=True)
 
         # 获取所有有主队列任务的Provider
         active_providers = _get_active_providers(redis_client)
@@ -236,3 +242,32 @@ def get_scheduler_status() -> dict:
             for job in _scheduler.get_jobs()
         ]
     }
+
+
+def _update_scheduler_status(running: bool):
+    """将调度器状态写入 Redis（用于监控）"""
+    import json
+    import time
+
+    try:
+        redis_client = get_redis_client()
+        if not redis_client:
+            return
+
+        status_data = {
+            'running': running,
+            'check_interval': CHECK_INTERVAL,
+            'batch_size': BATCH_SIZE,
+            'last_run': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'scheduler_type': 'APScheduler'
+        }
+
+        # 使用 RedisClient 的 set 方法，传入 expire 参数
+        redis_client.set(
+            'kg:batch_scheduler:info',
+            status_data,
+            expire=300  # 5分钟过期
+        )
+
+    except Exception as e:
+        logger.error(f"更新调度器状态到 Redis 失败: {e}")
