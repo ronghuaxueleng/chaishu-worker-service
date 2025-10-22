@@ -21,13 +21,58 @@ except Exception:
 # 进程内降级存储
 _fail_counts = {}
 _suspended_until = {}
+_last_request_time = {}  # 记录每个 Provider 最后一次请求时间
+_rate_limit_cache = {}   # 缓存 Provider 的频率限制配置
 
 MAX_CONSECUTIVE_FAILURES = 3
 SUSPEND_SECONDS = 10 * 60  # 10分钟
 
+# 默认请求频率限制（当数据库不可用时）
+DEFAULT_RATE_LIMIT_INTERVAL = 10  # 秒
+
 
 def _now() -> int:
     return int(time.time())
+
+
+def get_provider_rate_limit(provider_name: str) -> int:
+    """从数据库获取 Provider 的频率限制间隔
+
+    Args:
+        provider_name: Provider 名称
+
+    Returns:
+        频率限制间隔（秒），0 表示不限制
+    """
+    if not provider_name:
+        return 0
+
+    # 先从缓存读取
+    if provider_name in _rate_limit_cache:
+        cached_value, cached_time = _rate_limit_cache[provider_name]
+        # 缓存 60 秒
+        if time.time() - cached_time < 60:
+            return cached_value
+
+    # 从数据库读取
+    try:
+        from src.models.database import AIProvider, db_manager
+
+        with db_manager.get_session() as session:
+            provider = session.query(AIProvider).filter(
+                AIProvider.name == provider_name
+            ).first()
+
+            if provider and hasattr(provider, 'rate_limit_interval'):
+                interval = provider.rate_limit_interval or 0
+                # 缓存结果
+                _rate_limit_cache[provider_name] = (interval, time.time())
+                return interval
+    except Exception as e:
+        logger.warning(f"从数据库读取 Provider '{provider_name}' 频率限制失败: {e}")
+
+    # 降级使用默认值
+    return DEFAULT_RATE_LIMIT_INTERVAL
 
 
 def is_suspended(provider_name: str) -> bool:
@@ -186,3 +231,103 @@ def suspend_provider(provider_name: str, duration: int = SUSPEND_SECONDS) -> Non
     """
     _set_suspended(provider_name, seconds=duration)
     logger.info(f"Provider '{provider_name}' 已被暂停 {duration} 秒")
+
+
+def should_wait_for_rate_limit(provider_name: str) -> Tuple[bool, float]:
+    """检查是否需要因请求频率限制而等待
+
+    从数据库读取 Provider 的频率限制配置
+
+    Args:
+        provider_name: Provider 名称
+
+    Returns:
+        (should_wait, wait_seconds): 是否需要等待, 需要等待的秒数
+    """
+    if not provider_name:
+        return False, 0.0
+
+    # 从数据库获取频率限制间隔
+    min_interval = get_provider_rate_limit(provider_name)
+
+    # 如果间隔为 0，表示不限制
+    if min_interval <= 0:
+        return False, 0.0
+
+    now = time.time()
+
+    # 尝试从 Redis 读取最后请求时间
+    try:
+        if get_redis_client:
+            rc = get_redis_client()
+            if rc and rc.is_connected():
+                key = f"ai:provider:last_request:{provider_name}"
+                last_time_str = rc.get(key)
+                if last_time_str:
+                    try:
+                        last_time = float(last_time_str)
+                        elapsed = now - last_time
+
+                        if elapsed < min_interval:
+                            wait_seconds = min_interval - elapsed
+                            logger.debug(
+                                f"Provider {provider_name} 请求间隔不足: "
+                                f"距上次 {elapsed:.1f}秒, 需等待 {wait_seconds:.1f}秒"
+                            )
+                            return True, wait_seconds
+                    except (ValueError, TypeError):
+                        pass
+
+                return False, 0.0
+    except Exception as e:
+        logger.warning(f"从 Redis 读取请求时间失败: {e}")
+
+    # 内存降级
+    last_time = _last_request_time.get(provider_name)
+    if last_time:
+        elapsed = now - last_time
+
+        if elapsed < min_interval:
+            wait_seconds = min_interval - elapsed
+            logger.debug(
+                f"Provider {provider_name} 请求间隔不足: "
+                f"距上次 {elapsed:.1f}秒, 需等待 {wait_seconds:.1f}秒"
+            )
+            return True, wait_seconds
+
+    return False, 0.0
+
+
+def record_request_time(provider_name: str) -> None:
+    """记录 Provider 的请求时间（用于频率限制）
+
+    Args:
+        provider_name: Provider 名称
+    """
+    if not provider_name:
+        return
+
+    # 检查是否配置了频率限制
+    min_interval = get_provider_rate_limit(provider_name)
+    if min_interval <= 0:
+        return  # 不限制则不记录
+
+    now = time.time()
+
+    # 尝试写入 Redis
+    try:
+        if get_redis_client:
+            rc = get_redis_client()
+            if rc and rc.is_connected():
+                key = f"ai:provider:last_request:{provider_name}"
+                # 保存24小时，足够长的时间窗口
+                rc.set(key, str(now), expire=24 * 60 * 60)
+                logger.debug(f"记录 Provider {provider_name} 请求时间: {now}")
+                return
+    except Exception as e:
+        logger.warning(f"写入 Redis 请求时间失败: {e}")
+
+    # 内存降级
+    _last_request_time[provider_name] = now
+    logger.debug(f"记录 Provider {provider_name} 请求时间(内存): {now}")
+

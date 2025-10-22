@@ -89,19 +89,34 @@ class PromptTemplate(Base):
 
 class AIProvider(Base):
     __tablename__ = 'ai_providers'
-    
+
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)  # openai, claude, zhipu, deepseek
     display_name = Column(String(100), nullable=False)
-    api_key = Column(String(255))
+    api_key = Column(Text)  # 修改为 Text 类型以支持长 token（某些服务商使用 JSON token）
     base_url = Column(String(255))
     models = Column(JSON)  # 可用模型列表
     is_active = Column(Boolean, default=True)
+    rate_limit_interval = Column(Integer, default=10)  # 请求频率限制间隔（秒），0表示不限制
     created_at = Column(DateTime, default=beijing_now)
     updated_at = Column(DateTime, default=beijing_now, onupdate=beijing_now)
-    
+
     # 关联关系
     analyses = relationship("Analysis", back_populates="ai_provider")
+
+
+class AIProviderHistory(Base):
+    """AI Provider 操作历史记录"""
+    __tablename__ = 'ai_provider_history'
+
+    id = Column(Integer, primary_key=True)
+    provider_name = Column(String(100), nullable=False, index=True)
+    action = Column(String(50), nullable=False)  # 'disable', 'enable', 'adjust_workers', 'reassign_tasks'
+    reason = Column(Text)
+    details = Column(Text)  # JSON 格式的详细信息
+    operator = Column(String(100))  # 操作人（'system' 或用户名）
+    created_at = Column(DateTime, default=beijing_now, index=True)
+
 
 class Analysis(Base):
     __tablename__ = 'analyses'
@@ -615,90 +630,24 @@ class DatabaseManager:
         return base64.b64decode(encoded_string.encode('utf-8')).decode('utf-8')
     
     def _get_pool_config(self):
-        """获取连接池配置，优先从环境变量读取"""
-        # 从环境变量读取连接池配置
-        pool_config = {}
-
-        # Worker 节点应使用更小的连接池（每个进程只需少量连接）
-        # 默认值：pool_size=2, max_overflow=3，每个进程最多 5 个连接
-        if os.environ.get('DB_POOL_SIZE'):
-            pool_config['pool_size'] = int(os.environ.get('DB_POOL_SIZE'))
-        else:
-            pool_config['pool_size'] = 2  # Worker 节点默认值，主节点可以更大
-
-        if os.environ.get('DB_POOL_MAX_OVERFLOW'):
-            pool_config['max_overflow'] = int(os.environ.get('DB_POOL_MAX_OVERFLOW'))
-        else:
-            pool_config['max_overflow'] = 3  # Worker 节点默认值
-
-        if os.environ.get('DB_POOL_TIMEOUT'):
-            pool_config['pool_timeout'] = int(os.environ.get('DB_POOL_TIMEOUT'))
-        else:
-            pool_config['pool_timeout'] = 30
-
-        if os.environ.get('DB_POOL_RECYCLE'):
-            pool_config['pool_recycle'] = int(os.environ.get('DB_POOL_RECYCLE'))
-        else:
-            pool_config['pool_recycle'] = 3600
-
-        if os.environ.get('DB_POOL_PRE_PING'):
-            pool_config['pool_pre_ping'] = os.environ.get('DB_POOL_PRE_PING').lower() in ('true', '1', 'yes')
-        else:
-            pool_config['pool_pre_ping'] = True
-
-        logger.info(f"[数据库] 连接池配置: pool_size={pool_config['pool_size']}, max_overflow={pool_config['max_overflow']}, 最大连接数={pool_config['pool_size'] + pool_config['max_overflow']}")
-
-        # 如果环境变量未配置，尝试从 config.json 读取
-        if not pool_config:
+        """获取连接池配置"""
+        try:
+            from ..config import get_database_config
+            return get_database_config().get('pool', {})
+        except ImportError:
+            # 后备方案
             try:
-                from ..config import get_database_config
-                return get_database_config().get('pool', {})
-            except ImportError:
-                # 后备方案
-                try:
-                    config_path = os.path.join(os.path.dirname(__file__), '../../config/config.json')
-                    if os.path.exists(config_path):
-                        with open(config_path, 'r', encoding='utf-8') as f:
-                            config = json.load(f)
-                        return config.get('database', {}).get('pool', {})
-                except Exception:
-                    pass
-        return pool_config
+                config_path = os.path.join(os.path.dirname(__file__), '../../config/config.json')
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    return config.get('database', {}).get('pool', {})
+            except Exception:
+                pass
+        return {}
     
     def _get_database_url_from_config(self):
-        """从配置文件获取数据库URL，优先使用环境变量，默认使用SQLite，支持base64编码"""
-
-        # 优先从环境变量读取数据库配置
-        db_type_env = os.environ.get('DB_TYPE', '').lower()
-
-        if db_type_env == 'mysql' or (os.environ.get('DB_HOST') and os.environ.get('DB_NAME')):
-            # 从环境变量构建 MySQL 连接字符串
-            try:
-                host = os.environ.get('DB_HOST', 'localhost')
-                port = int(os.environ.get('DB_PORT', '3306'))
-                user = os.environ.get('DB_USER', 'root')
-                password = os.environ.get('DB_PASSWORD', '')
-                database = os.environ.get('DB_NAME', 'chaishu')
-                charset = os.environ.get('DB_CHARSET', 'utf8mb4')
-
-                from urllib.parse import quote_plus
-                encoded_password = quote_plus(password)
-                mysql_url = f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{database}?charset={charset}"
-                logger.info(f"[数据库] 从环境变量加载 MySQL 配置: {host}:{port}/{database}")
-                return mysql_url
-            except Exception as e:
-                logger.error(f"从环境变量构建 MySQL 连接失败: {e}")
-
-        elif db_type_env == 'sqlite' or os.environ.get('DB_PATH'):
-            # 从环境变量构建 SQLite 连接字符串
-            db_path = os.environ.get('DB_PATH', 'data/chaishu.db')
-            if not os.path.isabs(db_path):
-                db_path = os.path.join(os.path.dirname(__file__), '../../', db_path)
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
-            logger.info(f"[数据库] 从环境变量加载 SQLite 配置: {db_path}")
-            return f"sqlite:///{db_path}"
-
-        # 如果环境变量未配置，尝试从 config.json 读取
+        """从配置文件获取数据库URL，默认使用SQLite，支持base64编码"""
         try:
             # 使用统一配置管理器
             from ..config import get_database_config
@@ -716,7 +665,7 @@ class DatabaseManager:
             except Exception as e:
                 logger.error(f"配置文件读取失败: {e}")
                 db_config = {}
-
+        
         try:
             if db_config:
                 db_type = db_config.get('type', 'sqlite')

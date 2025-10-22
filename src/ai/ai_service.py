@@ -763,6 +763,19 @@ class OpenAICompatibleService(BaseAIService):
             # 调试日志：输出请求详情
             logger.info(f"[{self.provider_name}] OpenAI兼容API请求 - URL: {url}, Model: {model}, Prompt长度: {len(prompt)}")
 
+            # 🚦 请求频率限制（基于 DeepSeek 分析报告）
+            try:
+                from src.services.ai_provider_throttle import should_wait_for_rate_limit
+
+                should_wait, wait_seconds = should_wait_for_rate_limit(self.provider_name)
+                if should_wait and wait_seconds > 0:
+                    logger.info(
+                        f"[{self.provider_name}] ⏳ 频率限制: 等待 {wait_seconds:.1f} 秒后发送请求"
+                    )
+                    time.sleep(wait_seconds)
+            except Exception as e:
+                logger.warning(f"[{self.provider_name}] 频率限制检查失败: {e}")
+
             # 使用同步requests
             # 注意：requests的timeout分为(connect_timeout, read_timeout)
             # 这里使用单个值，表示总超时时间
@@ -801,7 +814,14 @@ class OpenAICompatibleService(BaseAIService):
                 output_tokens = usage.get('completion_tokens') or self.calculate_tokens(content)
 
                 logger.info(f"[{self.provider_name}] OpenAI兼容响应成功 - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}, 内容长度: {len(content)}")
-                
+
+                # 📝 记录请求时间（用于频率限制）
+                try:
+                    from src.services.ai_provider_throttle import record_request_time
+                    record_request_time(self.provider_name)
+                except Exception as e:
+                    logger.warning(f"[{self.provider_name}] 记录请求时间失败: {e}")
+
                 return {
                     "success": True,
                     "content": content,
