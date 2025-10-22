@@ -258,7 +258,7 @@ def kg_task_worker_process(provider: str):
 
                     # 将任务重新入队到其他Provider，而不是暂停
                     try:
-                        from .kg_task_queue_service import enqueue_task
+                        from .kg_task_queue_service import enqueue_to_main_queue
                         from src.models.database import db_manager, KnowledgeGraphTask
 
                         # 获取任务信息
@@ -280,7 +280,7 @@ def kg_task_worker_process(provider: str):
                                     session.commit()
 
                                     # 重新入队
-                                    if enqueue_task(task_id, new_provider):
+                                    if enqueue_to_main_queue(task_id, new_provider):
                                         logger.info(f"[KG-Worker] 超时任务 {task_id} 状态已改为pending并重新入队到 Provider: {new_provider}")
                                     else:
                                         logger.error(f"[KG-Worker] 超时任务 {task_id} 状态已改为pending但重新入队失败")
@@ -295,11 +295,11 @@ def kg_task_worker_process(provider: str):
                                     task.error_message = f"任务执行超时（{exec_duration:.0f}秒），已重新入队等待重试"
                                     session.commit()
 
-                                    if enqueue_task(task_id, provider):
+                                    if enqueue_to_main_queue(task_id, provider):
                                         logger.info(f"[KG-Worker] 超时任务 {task_id} 状态已改为pending并重新入队（同一Provider）")
                             elif task and not task.use_ai:
                                 # 规则引擎任务超时，重新入队到rules
-                                if enqueue_task(task_id, 'rules'):
+                                if enqueue_to_main_queue(task_id, 'rules'):
                                     logger.info(f"[KG-Worker] 超时的规则引擎任务 {task_id} 已重新入队")
 
                     except Exception as requeue_err:
@@ -360,7 +360,7 @@ def reassign_provider_active_tasks(suspended_provider: str) -> int:
 
     try:
         from src.utils.redis_client import get_redis_client
-        from .kg_task_queue_service import enqueue_task
+        from .kg_task_queue_service import enqueue_to_main_queue
 
         redis_client = get_redis_client()
         if not redis_client:
@@ -453,7 +453,7 @@ def reassign_provider_active_tasks(suspended_provider: str) -> int:
                         logger.info(f"[Provider-Suspend] 任务 {task_id} 状态已改为pending")
 
                 # 重新入队
-                if enqueue_task(task_id, target_provider):
+                if enqueue_to_main_queue(task_id, target_provider):
                     logger.info(f"[Provider-Suspend] 任务 {task_id} 已从 '{suspended_provider}' 重新分配到 '{target_provider}'")
                     reassigned_count += 1
                 else:
@@ -1097,7 +1097,7 @@ def start_auto_worker_guard(interval_seconds: int = 30):
             try:
                 from src.models.database import db_manager, AIProvider
                 from src.utils.redis_client import get_redis_client
-                from src.services.kg_task_queue_service import enqueue_task
+                from src.services.kg_task_queue_service import enqueue_to_main_queue
                 from src.api.kg_task_routes import _choose_provider_for_ai_task
 
                 redis_client = get_redis_client()
@@ -1179,7 +1179,7 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                                     new_provider = _choose_provider_for_ai_task()
 
                                     # 重新入队
-                                    if enqueue_task(task_id_int, new_provider):
+                                    if enqueue_to_main_queue(task_id_int, new_provider):
                                         logger.info(f"[KG-WorkerGuard] 任务 {task_id_int} 已从 {provider} 重新入队到 {new_provider}")
                                         requeued_tasks.append(task_id_int)
                                     else:
@@ -1195,32 +1195,70 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                             except Exception as e:
                                 logger.error(f"[KG-WorkerGuard] 删除 Worker 注册失败 {redis_key}: {e}")
 
-                        # 7. 清理该 provider 的队列（如果有）
+                        # 7. 清理该 provider 的队列（新队列系统：主队列 + 活跃批次）
                         try:
-                            queue_key = f"kg:ai_queue:{provider.lower()}"
-                            queue_len = redis_client.llen(queue_key)
-                            if queue_len > 0:
-                                logger.info(f"[KG-WorkerGuard] 服务商 '{provider}' 的队列中还有 {queue_len} 个任务，将重新分配")
+                            provider_lower = provider.lower()
+                            main_queue_key = f"kg:main_queue:{provider_lower}"
+                            active_batch_key = f"kg:active_batch:{provider_lower}"
+
+                            main_len = redis_client.llen(main_queue_key)
+                            active_len = redis_client.llen(active_batch_key)
+                            total_len = main_len + active_len
+
+                            if total_len > 0:
+                                logger.info(f"[KG-WorkerGuard] 服务商 '{provider}' 的队列中还有 {total_len} 个任务（主队列={main_len}, 活跃批次={active_len}），将重新分配")
 
                                 # 逐个取出并重新入队到活跃的 provider
+                                from ..api.kg_task_routes import _choose_provider_for_ai_task
+                                from .kg_task_queue_service import enqueue_to_main_queue
+
                                 requeued_from_queue = 0
-                                while redis_client.llen(queue_key) > 0:
-                                    task_id_bytes = redis_client.client.rpop(queue_key)
-                                    if not task_id_bytes:
+
+                                # 先处理活跃批次
+                                while redis_client.llen(active_batch_key) > 0:
+                                    item = redis_client.lpop(active_batch_key)
+                                    if not item:
                                         break
 
                                     try:
-                                        task_id_int = int(task_id_bytes.decode() if isinstance(task_id_bytes, bytes) else task_id_bytes)
+                                        data = item if isinstance(item, dict) else json.loads(item)
+                                        task_id_int = int(data.get('task_id')) if isinstance(data, dict) else None
+                                        if not task_id_int:
+                                            continue
+
                                         new_provider = _choose_provider_for_ai_task()
 
-                                        if enqueue_task(task_id_int, new_provider):
+                                        if enqueue_to_main_queue(task_id_int, new_provider):
                                             requeued_from_queue += 1
-                                            logger.debug(f"[KG-WorkerGuard] 队列任务 {task_id_int} 已从 {provider} 重新入队到 {new_provider}")
+                                            logger.debug(f"[KG-WorkerGuard] 活跃批次任务 {task_id_int} 已从 {provider} 重新入队到 {new_provider}")
                                         else:
-                                            logger.error(f"[KG-WorkerGuard] 队列任务 {task_id_int} 重新入队失败")
+                                            logger.error(f"[KG-WorkerGuard] 活跃批次任务 {task_id_int} 重新入队失败")
 
                                     except Exception as e:
-                                        logger.error(f"[KG-WorkerGuard] 处理队列任务失败: {e}")
+                                        logger.error(f"[KG-WorkerGuard] 处理活跃批次任务失败: {e}")
+
+                                # 再处理主队列
+                                while redis_client.llen(main_queue_key) > 0:
+                                    item = redis_client.lpop(main_queue_key)
+                                    if not item:
+                                        break
+
+                                    try:
+                                        data = item if isinstance(item, dict) else json.loads(item)
+                                        task_id_int = int(data.get('task_id')) if isinstance(data, dict) else None
+                                        if not task_id_int:
+                                            continue
+
+                                        new_provider = _choose_provider_for_ai_task()
+
+                                        if enqueue_to_main_queue(task_id_int, new_provider):
+                                            requeued_from_queue += 1
+                                            logger.debug(f"[KG-WorkerGuard] 主队列任务 {task_id_int} 已从 {provider} 重新入队到 {new_provider}")
+                                        else:
+                                            logger.error(f"[KG-WorkerGuard] 主队列任务 {task_id_int} 重新入队失败")
+
+                                    except Exception as e:
+                                        logger.error(f"[KG-WorkerGuard] 处理主队列任务失败: {e}")
 
                                 if requeued_from_queue > 0:
                                     logger.info(f"[KG-WorkerGuard] 从 '{provider}' 队列重新分配了 {requeued_from_queue} 个任务")

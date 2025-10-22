@@ -22,6 +22,83 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
+# 致命错误代码列表
+FATAL_ERROR_CODES = {
+    400,  # API Key 过期等客户端错误
+    401,  # 未授权
+    403,  # 权限被拒
+    500,  # 服务器内部错误
+}
+
+# 临时错误代码（只暂停，不禁用）
+TEMPORARY_ERROR_CODES = {
+    429,  # 速率限制/负载饱和
+    502,  # 网关错误
+    503,  # 服务不可用
+    504,  # 网关超时
+}
+
+
+def _auto_disable_provider_on_fatal_error(provider_name: str, status_code: int, error_message: str):
+    """检测致命错误并自动禁用 Provider
+
+    Args:
+        provider_name: Provider 名称
+        status_code: HTTP 状态码
+        error_message: 错误消息
+    """
+    if not provider_name:
+        return
+
+    try:
+        # 检查是否为致命错误
+        if status_code in FATAL_ERROR_CODES:
+            from src.services.ai_provider_management_service import AIProviderManagementService
+
+            mgmt_service = AIProviderManagementService()
+
+            # 构建禁用原因
+            error_reason_map = {
+                400: "API Key 过期或无效",
+                401: "认证失败",
+                403: "权限被拒绝或 API Key 被暂停",
+                500: "服务器内部错误",
+            }
+
+            reason = error_reason_map.get(status_code, f"HTTP {status_code} 错误")
+            full_reason = f"自动禁用: {reason} - {error_message[:100]}"
+
+            # 禁用 Provider
+            result = mgmt_service.disable_provider(
+                provider_name=provider_name,
+                reason=full_reason,
+                disable_db=True,
+                clear_redis=True
+            )
+
+            logger.warning(
+                f"🚨 [自动禁用] Provider '{provider_name}' 因致命错误被自动禁用 "
+                f"(错误码: {status_code}, 原因: {reason})"
+            )
+
+            return result
+
+        # 临时错误：只暂停，不禁用
+        elif status_code in TEMPORARY_ERROR_CODES:
+            from src.services.ai_provider_throttle import suspend_provider
+
+            # 暂停30分钟
+            suspend_duration = 1800  # 30分钟
+            suspend_provider(provider_name, duration=suspend_duration)
+
+            logger.warning(
+                f"⏸️  [临时暂停] Provider '{provider_name}' 因临时错误被暂停 {suspend_duration//60} 分钟 "
+                f"(错误码: {status_code})"
+            )
+
+    except Exception as e:
+        logger.error(f"自动禁用 Provider '{provider_name}' 失败: {e}", exc_info=True)
+
 class AIServiceException(Exception):
     """AI服务异常"""
     def __init__(self, message: str, provider: str = None, error_code: str = None):
@@ -640,13 +717,13 @@ class OpenAICompatibleService(BaseAIService):
             if response.status_code == 200:
                 data = response.json()
                 models = [model['id'] for model in data.get('data', [])]
-                logger.info(f"OpenAI兼容服务可用模型: {models}")
+                logger.info(f"[{self.provider_name}] OpenAI兼容服务可用模型: {models}")
                 return models
             else:
-                logger.error(f"OpenAI兼容服务获取模型列表失败: {response.status_code}")
+                logger.error(f"[{self.provider_name}] OpenAI兼容服务获取模型列表失败: {response.status_code}")
                 return []
         except Exception as e:
-            logger.warning(f"OpenAI兼容服务连接失败: {str(e)}")
+            logger.warning(f"[{self.provider_name}] OpenAI兼容服务连接失败: {str(e)}")
             return []
 
     async def generate_response(self, prompt: str, model: str, is_global: bool = False, **kwargs) -> Dict[str, Any]:
@@ -696,30 +773,30 @@ class OpenAICompatibleService(BaseAIService):
                 try:
                     result = response.json()
                 except Exception as e:
-                    logger.error(f"OpenAI兼容API响应解析失败: {response.text}")
-                    raise AIServiceException(f"响应解析失败: {str(e)}", provider="openai-compatible")
-                
+                    logger.error(f"[{self.provider_name}] OpenAI兼容API响应解析失败: {response.text}")
+                    raise AIServiceException(f"响应解析失败: {str(e)}", provider=self.provider_name)
+
                 # 检查响应格式，确保包含choices字段
                 if "choices" not in result or not result["choices"]:
-                    logger.error(f"OpenAI兼容API响应格式错误: {result}")
-                    raise AIServiceException("API响应缺少choices字段", provider="openai-compatible")
-                
+                    logger.error(f"[{self.provider_name}] OpenAI兼容API响应格式错误: {result}")
+                    raise AIServiceException("API响应缺少choices字段", provider=self.provider_name)
+
                 # 尝试获取token统计，没有则估算
                 usage = result.get('usage', {})
                 input_tokens = usage.get('prompt_tokens') or self.calculate_tokens(prompt)
-                
+
                 # 安全获取响应内容
                 content = ""
                 try:
                     content = result["choices"][0]["message"]["content"]
                 except (KeyError, IndexError, TypeError) as e:
-                    logger.error(f"OpenAI兼容API响应结构错误: {e}, 响应: {result}")
-                    raise AIServiceException(f"API响应结构错误: {e}", provider="openai-compatible")
-                
+                    logger.error(f"[{self.provider_name}] OpenAI兼容API响应结构错误: {e}, 响应: {result}")
+                    raise AIServiceException(f"API响应结构错误: {e}", provider=self.provider_name)
+
                 # 验证内容有效性
                 if not content or content.strip() == "":
-                    logger.error(f"OpenAI兼容API返回空内容 - 响应: {result}")
-                    raise AIServiceException("API返回空内容，可能是模型配置问题或API限制", provider="openai-compatible")
+                    logger.error(f"[{self.provider_name}] OpenAI兼容API返回空内容 - 响应: {result}")
+                    raise AIServiceException("API返回空内容，可能是模型配置问题或API限制", provider=self.provider_name)
                 
                 output_tokens = usage.get('completion_tokens') or self.calculate_tokens(content)
 
@@ -737,31 +814,41 @@ class OpenAICompatibleService(BaseAIService):
                     error_data = response.json() if response.text else {}
                 except:
                     error_data = {}
-                logger.error(f"OpenAI兼容API错误 - 状态码: {response.status_code}, 错误: {error_data}")
-                logger.error(f"OpenAI兼容错误响应文本: {response.text}")
+
+                error_message = error_data.get('error', {}).get('message', '未知错误')
+                logger.error(f"[{self.provider_name}] OpenAI兼容API错误 - 状态码: {response.status_code}, 错误: {error_data}")
+                logger.error(f"[{self.provider_name}] OpenAI兼容错误响应文本: {response.text}")
+
+                # 🚨 自动禁用/暂停 Provider
+                _auto_disable_provider_on_fatal_error(
+                    provider_name=self.provider_name,
+                    status_code=response.status_code,
+                    error_message=error_message
+                )
+
                 raise AIServiceException(
-                    f"OpenAI兼容API错误: {error_data.get('error', {}).get('message', '未知错误')}",
-                    provider="openai-compatible",
+                    f"OpenAI兼容API错误: {error_message}",
+                    provider=self.provider_name,
                     error_code=str(response.status_code)
                 )
-        
+
         except requests.ConnectionError as e:
-            logger.error(f"OpenAI兼容连接错误: {str(e)}")
-            raise AIServiceException(f"连接失败", provider="openai-compatible")
+            logger.error(f"[{self.provider_name}] OpenAI兼容连接错误: {str(e)}")
+            raise AIServiceException(f"连接失败", provider=self.provider_name)
         except requests.Timeout as e:
-            logger.error(f"OpenAI兼容超时错误: {str(e)}")
-            raise AIServiceException(f"请求超时", provider="openai-compatible")
+            logger.error(f"[{self.provider_name}] OpenAI兼容超时错误: {str(e)}")
+            raise AIServiceException(f"请求超时", provider=self.provider_name)
         except requests.RequestException as e:
-            logger.error(f"OpenAI兼容网络请求错误: {str(e)}")
-            raise AIServiceException(f"网络请求错误: {str(e)}", provider="openai-compatible")
+            logger.error(f"[{self.provider_name}] OpenAI兼容网络请求错误: {str(e)}")
+            raise AIServiceException(f"网络请求错误: {str(e)}", provider=self.provider_name)
         except Exception as e:
             # 特殊处理事件循环关闭的情况（通常是用户停止任务导致）
             if "Event loop is closed" in str(e) or "RuntimeError" in str(type(e).__name__):
-                logger.warning(f"检测到事件循环关闭（可能是用户停止了任务）: {str(e)}")
-                raise AIServiceException("任务已被停止", provider="openai-compatible")
-            
-            logger.error(f"OpenAI兼容服务异常: {str(e)}")
-            raise AIServiceException(f"OpenAI兼容服务错误: {str(e)}", provider="openai-compatible")
+                logger.warning(f"[{self.provider_name}] 检测到事件循环关闭（可能是用户停止了任务）: {str(e)}")
+                raise AIServiceException("任务已被停止", provider=self.provider_name)
+
+            logger.error(f"[{self.provider_name}] OpenAI兼容服务异常: {str(e)}")
+            raise AIServiceException(f"OpenAI兼容服务错误: {str(e)}", provider=self.provider_name)
     
     def _parse_stream_response(self, response_text: str) -> dict:
         """解析流式响应"""
@@ -1076,7 +1163,7 @@ class AIServiceManager:
                         pass
                     return {"success": False, "error": "AI响应失败"}
             except Exception as e:
-                logger.error(f"同步AI响应异常: {str(e)}")
+                logger.error(f"[{provider_name}] 同步AI响应异常: {str(e)}")
                 try:
                     increment_failure(provider_name)
                 except Exception:
@@ -1125,7 +1212,7 @@ class AIServiceManager:
                         pass
                 loop.close()
         except Exception as e:
-            logger.error(f"同步AI响应异常: {str(e)}")
+            logger.error(f"[{provider_name}] 同步AI响应异常: {str(e)}")
             try:
                 increment_failure(provider_name)
             except Exception:

@@ -176,3 +176,13 @@ def clear_suspension(provider_name: str) -> None:
         pass
     _suspended_until.pop(provider_name, None)
 
+
+def suspend_provider(provider_name: str, duration: int = SUSPEND_SECONDS) -> None:
+    """公开接口：暂停指定 Provider
+
+    Args:
+        provider_name: Provider 名称
+        duration: 暂停时长（秒），默认使用 SUSPEND_SECONDS
+    """
+    _set_suspended(provider_name, seconds=duration)
+    logger.info(f"Provider '{provider_name}' 已被暂停 {duration} 秒")
