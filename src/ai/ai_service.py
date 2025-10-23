@@ -38,6 +38,74 @@ TEMPORARY_ERROR_CODES = {
     504,  # 网关超时
 }
 
+# 响应内容中的致命错误模式（账户余额不足等）
+FATAL_CONTENT_PATTERNS = [
+    "蒜粒或金币不足",
+    "余额不足",
+    "账户余额不足",
+    "积分不足",
+    "credits insufficient",
+    "insufficient balance",
+    "out of credits",
+    "请充值",
+    "请续费",
+    "账号已过期",
+    "account expired",
+    "subscription expired",
+]
+
+
+def _check_fatal_content_error(provider_name: str, content: str) -> bool:
+    """检查响应内容是否包含致命错误模式（如账户余额不足）
+
+    Args:
+        provider_name: Provider 名称
+        content: 响应内容
+
+    Returns:
+        True 如果检测到致命错误并已禁用Provider，False 否则
+    """
+    if not provider_name or not content:
+        return False
+
+    try:
+        # 检查是否包含致命错误模式
+        content_lower = content.lower()
+        matched_pattern = None
+
+        for pattern in FATAL_CONTENT_PATTERNS:
+            if pattern.lower() in content_lower:
+                matched_pattern = pattern
+                break
+
+        if matched_pattern:
+            from src.services.ai_provider_management_service import AIProviderManagementService
+
+            mgmt_service = AIProviderManagementService()
+
+            # 构建禁用原因
+            reason = f"自动禁用: 检测到账户不可用 - 响应包含'{matched_pattern}' - {content[:100]}"
+
+            # 禁用 Provider
+            result = mgmt_service.disable_provider(
+                provider_name=provider_name,
+                reason=reason,
+                disable_db=True,
+                clear_redis=True
+            )
+
+            logger.warning(
+                f"🚨 [自动禁用] Provider '{provider_name}' 因账户不可用被自动禁用 "
+                f"(匹配模式: '{matched_pattern}', 响应: {content[:50]}...)"
+            )
+
+            return True
+
+    except Exception as e:
+        logger.error(f"检查致命内容错误失败: {e}", exc_info=True)
+
+    return False
+
 
 def _auto_disable_provider_on_fatal_error(provider_name: str, status_code: int, error_message: str):
     """检测致命错误并自动禁用 Provider
@@ -764,15 +832,18 @@ class OpenAICompatibleService(BaseAIService):
             logger.info(f"[{self.provider_name}] OpenAI兼容API请求 - URL: {url}, Model: {model}, Prompt长度: {len(prompt)}")
 
             # 🚦 请求频率限制（基于 DeepSeek 分析报告）
+            # 使用原子操作避免并发竞争
             try:
-                from src.services.ai_provider_throttle import should_wait_for_rate_limit
+                from src.services.ai_provider_throttle import try_acquire_request_permit
 
-                should_wait, wait_seconds = should_wait_for_rate_limit(self.provider_name)
-                if should_wait and wait_seconds > 0:
+                acquired, wait_seconds = try_acquire_request_permit(self.provider_name)
+                while not acquired and wait_seconds > 0:
                     logger.info(
-                        f"[{self.provider_name}] ⏳ 频率限制: 等待 {wait_seconds:.1f} 秒后发送请求"
+                        f"[{self.provider_name}] ⏳ 频率限制: 等待 {wait_seconds:.1f} 秒后重试"
                     )
                     time.sleep(wait_seconds)
+                    # 等待后重新尝试获取许可（原子操作）
+                    acquired, wait_seconds = try_acquire_request_permit(self.provider_name)
             except Exception as e:
                 logger.warning(f"[{self.provider_name}] 频率限制检查失败: {e}")
 
@@ -810,17 +881,20 @@ class OpenAICompatibleService(BaseAIService):
                 if not content or content.strip() == "":
                     logger.error(f"[{self.provider_name}] OpenAI兼容API返回空内容 - 响应: {result}")
                     raise AIServiceException("API返回空内容，可能是模型配置问题或API限制", provider=self.provider_name)
-                
+
+                # 🚨 检查响应内容是否包含致命错误（如账户余额不足）
+                if _check_fatal_content_error(self.provider_name, content):
+                    logger.error(f"[{self.provider_name}] 检测到致命错误，Provider已被自动禁用")
+                    raise AIServiceException(
+                        f"检测到账户不可用错误: {content[:100]}",
+                        provider=self.provider_name
+                    )
+
                 output_tokens = usage.get('completion_tokens') or self.calculate_tokens(content)
 
                 logger.info(f"[{self.provider_name}] OpenAI兼容响应成功 - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}, 内容长度: {len(content)}")
 
-                # 📝 记录请求时间（用于频率限制）
-                try:
-                    from src.services.ai_provider_throttle import record_request_time
-                    record_request_time(self.provider_name)
-                except Exception as e:
-                    logger.warning(f"[{self.provider_name}] 记录请求时间失败: {e}")
+                # 📝 请求时间已在 try_acquire_request_permit() 中原子记录，无需再次调用
 
                 return {
                     "success": True,

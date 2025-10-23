@@ -233,56 +233,108 @@ def suspend_provider(provider_name: str, duration: int = SUSPEND_SECONDS) -> Non
     logger.info(f"Provider '{provider_name}' 已被暂停 {duration} 秒")
 
 
-def should_wait_for_rate_limit(provider_name: str) -> Tuple[bool, float]:
-    """检查是否需要因请求频率限制而等待
+# Lua 脚本：原子地检查并更新请求时间
+# 返回值：0 表示允许请求，>0 表示需要等待的秒数
+_RATE_LIMIT_LUA_SCRIPT = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local interval = tonumber(ARGV[2])
+local expire_time = tonumber(ARGV[3])
 
-    从数据库读取 Provider 的频率限制配置
+local last_time_str = redis.call('GET', key)
+
+if not last_time_str then
+    -- 首次请求，直接允许并记录时间
+    redis.call('SET', key, now, 'EX', expire_time)
+    return 0
+else
+    -- 尝试解析上次请求时间
+    local last_time = tonumber(last_time_str)
+
+    -- 如果直接解析失败，可能是 JSON 格式（带引号），尝试去除引号
+    if not last_time then
+        -- 去除首尾引号: "1234.56" -> 1234.56
+        local cleaned = string.gsub(last_time_str, '^"(.*)"$', '%1')
+        last_time = tonumber(cleaned)
+    end
+
+    -- 如果还是失败，说明数据格式错误，删除并重新记录
+    if not last_time then
+        redis.call('SET', key, now, 'EX', expire_time)
+        return 0
+    end
+
+    local elapsed = now - last_time
+    if elapsed >= interval then
+        -- 间隔足够，允许请求并更新时间
+        redis.call('SET', key, now, 'EX', expire_time)
+        return 0
+    else
+        -- 间隔不足，返回需要等待的秒数
+        return interval - elapsed
+    end
+end
+"""
+
+
+def try_acquire_request_permit(provider_name: str) -> Tuple[bool, float]:
+    """尝试获取请求许可（原子操作，使用 Redis Lua 脚本）
+
+    此函数使用 Lua 脚本在 Redis 中原子地完成以下操作：
+    1. 检查距离上次请求的时间间隔
+    2. 如果间隔足够，立即更新请求时间并返回许可
+    3. 如果间隔不足，返回需要等待的时间
+
+    解决了并发场景下多个进程/线程同时检查和更新导致的竞争条件。
 
     Args:
         provider_name: Provider 名称
 
     Returns:
-        (should_wait, wait_seconds): 是否需要等待, 需要等待的秒数
+        (acquired, wait_seconds): 是否获得许可, 需要等待的秒数
     """
     if not provider_name:
-        return False, 0.0
+        return True, 0.0
 
     # 从数据库获取频率限制间隔
     min_interval = get_provider_rate_limit(provider_name)
 
     # 如果间隔为 0，表示不限制
     if min_interval <= 0:
-        return False, 0.0
+        return True, 0.0
 
     now = time.time()
+    key = f"ai:provider:last_request:{provider_name}"
+    expire_time = 24 * 60 * 60  # 24小时过期
 
-    # 尝试从 Redis 读取最后请求时间
+    # 尝试使用 Redis Lua 脚本实现原子操作
     try:
         if get_redis_client:
             rc = get_redis_client()
             if rc and rc.is_connected():
-                key = f"ai:provider:last_request:{provider_name}"
-                last_time_str = rc.get(key)
-                if last_time_str:
-                    try:
-                        last_time = float(last_time_str)
-                        elapsed = now - last_time
+                # 执行 Lua 脚本
+                wait_seconds = rc.client.eval(
+                    _RATE_LIMIT_LUA_SCRIPT,
+                    1,  # KEYS 数量
+                    key,  # KEYS[1]
+                    now,  # ARGV[1]
+                    min_interval,  # ARGV[2]
+                    expire_time  # ARGV[3]
+                )
 
-                        if elapsed < min_interval:
-                            wait_seconds = min_interval - elapsed
-                            logger.debug(
-                                f"Provider {provider_name} 请求间隔不足: "
-                                f"距上次 {elapsed:.1f}秒, 需等待 {wait_seconds:.1f}秒"
-                            )
-                            return True, wait_seconds
-                    except (ValueError, TypeError):
-                        pass
+                if wait_seconds == 0:
+                    logger.debug(f"✅ Provider {provider_name} 获得请求许可")
+                    return True, 0.0
+                else:
+                    logger.debug(
+                        f"⏳ Provider {provider_name} 请求间隔不足，需等待 {wait_seconds:.1f} 秒"
+                    )
+                    return False, float(wait_seconds)
 
-                return False, 0.0
     except Exception as e:
-        logger.warning(f"从 Redis 读取请求时间失败: {e}")
+        logger.warning(f"Redis Lua 脚本执行失败，降级到内存检查: {e}")
 
-    # 内存降级
+    # 内存降级（非原子，但总比没有好）
     last_time = _last_request_time.get(provider_name)
     if last_time:
         elapsed = now - last_time
@@ -290,44 +342,57 @@ def should_wait_for_rate_limit(provider_name: str) -> Tuple[bool, float]:
         if elapsed < min_interval:
             wait_seconds = min_interval - elapsed
             logger.debug(
-                f"Provider {provider_name} 请求间隔不足: "
+                f"Provider {provider_name} 请求间隔不足(内存): "
                 f"距上次 {elapsed:.1f}秒, 需等待 {wait_seconds:.1f}秒"
             )
-            return True, wait_seconds
+            return False, wait_seconds
 
-    return False, 0.0
+    # 内存模式下，更新请求时间
+    _last_request_time[provider_name] = now
+    return True, 0.0
+
+
+def should_wait_for_rate_limit(provider_name: str) -> Tuple[bool, float]:
+    """检查是否需要因请求频率限制而等待
+
+    ⚠️ 已废弃：请使用 try_acquire_request_permit() 代替
+    此函数保留仅为向后兼容，但存在并发竞争问题
+
+    Args:
+        provider_name: Provider 名称
+
+    Returns:
+        (should_wait, wait_seconds): 是否需要等待, 需要等待的秒数
+    """
+    logger.warning(
+        "should_wait_for_rate_limit() 已废弃，存在并发竞争问题，"
+        "请使用 try_acquire_request_permit() 代替"
+    )
+    acquired, wait_seconds = try_acquire_request_permit(provider_name)
+    return not acquired, wait_seconds
 
 
 def record_request_time(provider_name: str) -> None:
     """记录 Provider 的请求时间（用于频率限制）
 
+    ⚠️ 已废弃：请使用 try_acquire_request_permit() 代替
+    新的原子操作已经在检查时自动记录时间，无需单独调用此函数
+
     Args:
         provider_name: Provider 名称
     """
+    logger.warning(
+        "record_request_time() 已废弃，请使用 try_acquire_request_permit() 代替，"
+        "新的原子操作已在检查时自动记录时间"
+    )
+    # 为了向后兼容，保留基本逻辑
     if not provider_name:
         return
 
-    # 检查是否配置了频率限制
     min_interval = get_provider_rate_limit(provider_name)
     if min_interval <= 0:
-        return  # 不限制则不记录
+        return
 
     now = time.time()
-
-    # 尝试写入 Redis
-    try:
-        if get_redis_client:
-            rc = get_redis_client()
-            if rc and rc.is_connected():
-                key = f"ai:provider:last_request:{provider_name}"
-                # 保存24小时，足够长的时间窗口
-                rc.set(key, str(now), expire=24 * 60 * 60)
-                logger.debug(f"记录 Provider {provider_name} 请求时间: {now}")
-                return
-    except Exception as e:
-        logger.warning(f"写入 Redis 请求时间失败: {e}")
-
-    # 内存降级
     _last_request_time[provider_name] = now
-    logger.debug(f"记录 Provider {provider_name} 请求时间(内存): {now}")
 
