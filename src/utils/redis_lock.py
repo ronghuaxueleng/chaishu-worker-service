@@ -24,7 +24,7 @@ def redis_distributed_lock(
     使用 Redis SETNX 实现分布式锁，防止多节点并发冲突
 
     Args:
-        redis_client: Redis 客户端实例
+        redis_client: Redis 客户端实例（RedisClient 对象）
         lock_key: 锁的键名（建议格式: lock:operation_name）
         timeout: 锁超时时间（秒），防止死锁，默认30秒
         blocking: 是否阻塞等待锁，默认 False
@@ -59,6 +59,9 @@ def redis_distributed_lock(
         yield False
         return
 
+    # 使用底层的 redis-py 客户端，支持 nx 和 ex 参数
+    raw_client = redis_client.client
+
     # 生成唯一的锁值（包含进程ID和时间戳）
     lock_value = f"{os.getpid()}_{time.time()}"
     acquired = False
@@ -67,7 +70,7 @@ def redis_distributed_lock(
     try:
         # 尝试获取锁
         while True:
-            acquired = redis_client.set(lock_key, lock_value, nx=True, ex=timeout)
+            acquired = raw_client.set(lock_key, lock_value, nx=True, ex=timeout)
 
             if acquired:
                 logger.debug(f"成功获取分布式锁: {lock_key}")
@@ -103,7 +106,7 @@ def redis_distributed_lock(
             end
             """
             try:
-                result = redis_client.eval(lua_script, 1, lock_key, lock_value)
+                result = raw_client.eval(lua_script, 1, lock_key, lock_value)
                 if result == 1:
                     logger.debug(f"成功释放分布式锁: {lock_key}")
                 else:
@@ -126,7 +129,7 @@ def acquire_lock(
     适用于需要手动控制锁释放时机的场景
 
     Args:
-        redis_client: Redis 客户端实例
+        redis_client: Redis 客户端实例（RedisClient 对象）
         lock_key: 锁的键名
         timeout: 锁超时时间（秒）
         blocking: 是否阻塞等待
@@ -147,11 +150,14 @@ def acquire_lock(
         logger.warning("Redis 未连接，无法使用分布式锁")
         return None
 
+    # 使用底层的 redis-py 客户端
+    raw_client = redis_client.client
+
     lock_value = f"{os.getpid()}_{time.time()}"
     start_time = time.time()
 
     while True:
-        acquired = redis_client.set(lock_key, lock_value, nx=True, ex=timeout)
+        acquired = raw_client.set(lock_key, lock_value, nx=True, ex=timeout)
 
         if acquired:
             logger.debug(f"成功获取分布式锁: {lock_key}")
@@ -174,7 +180,7 @@ def release_lock(redis_client, lock_key: str, lock_value: str) -> bool:
     """释放分布式锁
 
     Args:
-        redis_client: Redis 客户端实例
+        redis_client: Redis 客户端实例（RedisClient 对象）
         lock_key: 锁的键名
         lock_value: 获取锁时返回的值
 
@@ -185,6 +191,9 @@ def release_lock(redis_client, lock_key: str, lock_value: str) -> bool:
         logger.warning("Redis 未连接")
         return False
 
+    # 使用底层的 redis-py 客户端
+    raw_client = redis_client.client
+
     lua_script = """
     if redis.call("get", KEYS[1]) == ARGV[1] then
         return redis.call("del", KEYS[1])
@@ -194,7 +203,7 @@ def release_lock(redis_client, lock_key: str, lock_value: str) -> bool:
     """
 
     try:
-        result = redis_client.eval(lua_script, 1, lock_key, lock_value)
+        result = raw_client.eval(lua_script, 1, lock_key, lock_value)
         if result == 1:
             logger.debug(f"成功释放分布式锁: {lock_key}")
             return True
