@@ -98,6 +98,22 @@ class AIProvider(Base):
     models = Column(JSON)  # 可用模型列表
     is_active = Column(Boolean, default=True)
     rate_limit_interval = Column(Integer, default=10)  # 请求频率限制间隔（秒），0表示不限制
+    disabled_reason = Column(Text)  # 停用原因
+
+    # 优先级与负载均衡字段
+    priority = Column(Integer, default=50)  # 优先级（1-100，数值越大优先级越高）
+    max_concurrent_tasks = Column(Integer, default=5)  # 最大并发任务数
+    current_load = Column(Integer, default=0)  # 当前负载（正在执行的任务数）
+    success_count = Column(Integer, default=0)  # 成功执行任务数
+    failure_count = Column(Integer, default=0)  # 失败任务数
+    total_execution_time = Column(Float, default=0.0)  # 总执行时间（秒）
+    avg_execution_time = Column(Float, default=0.0)  # 平均执行时间（秒）
+    last_success_at = Column(DateTime)  # 最后成功时间
+    last_failure_at = Column(DateTime)  # 最后失败时间
+    auto_scale_enabled = Column(Boolean, default=True)  # 是否启用自动扩缩容
+    min_workers = Column(Integer, default=0)  # 最小Worker数量（0表示可降为0）
+    max_workers = Column(Integer, default=3)  # 最大Worker数量
+
     created_at = Column(DateTime, default=beijing_now)
     updated_at = Column(DateTime, default=beijing_now, onupdate=beijing_now)
 
