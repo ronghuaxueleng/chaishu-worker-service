@@ -145,11 +145,15 @@ def main():
     node_name = os.environ.get('KG_WORKER_NODE_NAME', 'worker-node')
     per_provider = int(os.environ.get('KG_WORKERS_PER_PROVIDER', '2'))
     providers = os.environ.get('KG_WORKER_PROVIDERS', None)
+    tags = os.environ.get('KG_WORKER_PROVIDERS_TAGS', None)
     max_total = os.environ.get('KG_MAX_TOTAL_PROCESSES', '50')
     max_per_provider = os.environ.get('KG_MAX_PROCESSES_PER_PROVIDER', '10')
 
     if providers:
         providers = [p.strip() for p in providers.split(',') if p.strip()]
+
+    if tags:
+        tags = [t.strip() for t in tags.split(',') if t.strip()]
 
     print(">>> [DEBUG] 配置读取完成，准备输出配置信息...")
     sys.stdout.flush()
@@ -161,7 +165,9 @@ def main():
     logger.info(f"最大总进程数: {max_total}")
     logger.info(f"单Provider最大进程数: {max_per_provider}")
 
-    if providers:
+    if tags:
+        logger.info(f"按标签筛选Providers: {tags}")
+    elif providers:
         logger.info(f"指定Providers: {providers}")
     else:
         logger.info("自动发现激活的 Providers")
@@ -210,6 +216,7 @@ def main():
         logger.info("正在启动 Worker 进程...")
         start_kg_task_workers(
             providers=providers,
+            tags=tags,
             per_provider_processes=per_provider
         )
         logger.info("✓ Worker 进程已启动，节点进入运行状态")
