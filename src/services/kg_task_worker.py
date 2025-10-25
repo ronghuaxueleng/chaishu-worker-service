@@ -146,7 +146,7 @@ def kg_task_worker_process(provider: str):
 
             success = redis_client.hmset(worker_key, worker_data)
             if success:
-                redis_client.expire(worker_key, 7200)  # 2小时过期（支持长时间任务 + 足够的心跳缓冲）
+                redis_client.expire(worker_key, 300)  # 5分钟过期（如果Worker崩溃，5分钟后自动清理注册）
                 logger.info(f"[KG-Worker] 注册成功: pid={os.getpid()}, task_id={task_id or '空闲'}, node={node_name}")
                 return True
             else:
@@ -467,6 +467,102 @@ def reassign_provider_active_tasks(suspended_provider: str) -> int:
 
     except Exception as e:
         logger.error(f"[Provider-Suspend] 重新分配Provider任务失败: {e}", exc_info=True)
+        return 0
+
+
+def _cleanup_stale_worker_registrations() -> int:
+    """清理 Redis 中的僵尸 Worker 注册（进程已不存在但 Redis 记录还在）
+
+    Returns:
+        清理的僵尸注册数量
+    """
+    try:
+        from src.utils.redis_client import get_redis_client
+        import psutil
+
+        redis_client = get_redis_client()
+        if not redis_client or not redis_client.is_connected():
+            logger.debug("[KG-Worker] Redis 未连接，跳过僵尸注册清理")
+            return 0
+
+        worker_keys = redis_client.keys('kg:worker:*')
+        if not worker_keys:
+            return 0
+
+        stale_worker_keys = []
+
+        for key in worker_keys:
+            try:
+                key_str = key.decode() if isinstance(key, bytes) else key
+                pid = int(key_str.replace('kg:worker:', ''))
+
+                # 读取 Worker 信息
+                worker_info = redis_client.hgetall(key)
+                if not worker_info:
+                    stale_worker_keys.append(key_str)
+                    continue
+
+                # 解析 provider 和 node_name
+                provider_raw = worker_info.get(b'provider') if isinstance(list(worker_info.keys())[0], bytes) else worker_info.get('provider')
+                provider = (provider_raw.decode() if isinstance(provider_raw, bytes) else provider_raw) if provider_raw else 'unknown'
+
+                node_name_raw = worker_info.get(b'node_name') if isinstance(list(worker_info.keys())[0], bytes) else worker_info.get('node_name')
+                node_name = (node_name_raw.decode() if isinstance(node_name_raw, bytes) else node_name_raw) if node_name_raw else None
+
+                # 健康检查：验证进程是否真实存在
+                is_alive = False
+
+                # 主节点 Worker：node_name 以"主节点-"开头，使用本地进程检查
+                if node_name and node_name.startswith('主节点-'):
+                    try:
+                        if psutil.pid_exists(pid):
+                            process = psutil.Process(pid)
+                            # 检查进程名称中是否包含 python
+                            if 'python' in process.name().lower():
+                                is_alive = True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                elif node_name:
+                    # 远程节点：检查节点心跳是否存在
+                    node_key = f"kg:nodes:{node_name}"
+                    node_info = redis_client.hgetall(node_key)
+                    if node_info:
+                        is_alive = True
+                    else:
+                        logger.debug(f"[KG-Worker] 节点心跳不存在: node={node_name}, pid={pid}")
+                else:
+                    # 兼容旧版本：没有 node_name 的本地 Worker
+                    try:
+                        if psutil.pid_exists(pid):
+                            process = psutil.Process(pid)
+                            if 'python' in process.name().lower():
+                                is_alive = True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+
+                # 如果进程不存在，标记为过期
+                if not is_alive:
+                    stale_worker_keys.append(key_str)
+                    logger.debug(f"[KG-Worker] 检测到僵尸注册: pid={pid}, provider={provider}, node={node_name or '本地'}")
+
+            except Exception as e:
+                logger.debug(f"[KG-Worker] 解析 Worker key 失败: {key}, {e}")
+                continue
+
+        # 批量删除僵尸注册
+        if stale_worker_keys:
+            try:
+                redis_client.delete(*stale_worker_keys)
+                logger.info(f"[KG-Worker] 清理了 {len(stale_worker_keys)} 个僵尸 Worker 注册")
+                return len(stale_worker_keys)
+            except Exception as e:
+                logger.warning(f"[KG-Worker] 清理僵尸注册失败: {e}")
+                return 0
+
+        return 0
+
+    except Exception as e:
+        logger.error(f"[KG-Worker] 清理僵尸注册异常: {e}", exc_info=True)
         return 0
 
 
@@ -1294,26 +1390,33 @@ def start_auto_worker_guard(interval_seconds: int = 30):
             while _guard_running:
                 try:
                     loop_count += 1
-                    # 该函数具备去重能力：仅为缺失的provider拉起进程
-                    start_kg_task_workers(per_provider_processes=per)
 
-                    # 每次循环都检查长时间运行的任务（5分钟超时）
+                    # 【职责分离】守护线程只负责监控和清理，不管理 Worker 数量
+                    # Worker 数量管理完全交给自动扩缩容系统
+
+                    # 清理僵尸注册（每次循环都执行）
+                    cleaned = _cleanup_stale_worker_registrations()
+                    if cleaned > 0:
+                        logger.info(f"[KG-WorkerGuard] 已清理 {cleaned} 个僵尸注册")
+
+                    # 检查长时间运行的任务（每次循环都执行，5分钟超时）
                     _check_long_running_tasks()
 
-                    # 每2次循环（约1分钟，假设interval=30s）检查已删除的服务商
+                    # 每2次循环（约1分钟）检查已删除的服务商
                     if loop_count % 2 == 0:
                         _check_deleted_providers()
 
-                    # 每5次循环（约2.5分钟，假设interval=30s）自动启动 created 任务
+                    # 每5次循环（约2.5分钟）自动启动 created 任务
                     if loop_count % 5 == 0:
                         _auto_start_created_tasks()
 
                     # 每10次循环输出一次健康检查日志
                     if loop_count % 10 == 0:
-                        total_alive = len([p for p in _worker_processes if p.is_alive()])
-                        logger.debug(f"[KG-WorkerGuard] 健康检查: {total_alive} 个活跃Worker进程")
+                        stats = get_worker_stats()
+                        total_workers = sum(p['processes'] for p in stats['providers'].values())
+                        logger.info(f"[KG-WorkerGuard] 健康检查: {total_workers} 个活跃Worker进程")
 
-                    # 每20次循环（约10分钟，假设interval=30s）检查一次僵尸任务
+                    # 每20次循环（约10分钟）检查一次僵尸任务
                     if loop_count % 20 == 0:
                         logger.info(f"[KG-WorkerGuard] 定期检查僵尸任务...")
                         _check_zombie_tasks()

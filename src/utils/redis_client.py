@@ -5,7 +5,6 @@ Redis客户端管理
 import redis
 import json
 import logging
-import os
 from typing import Optional, List, Dict, Any
 from datetime import timedelta
 
@@ -26,7 +25,7 @@ class RedisClient:
         """
         初始化Redis客户端
 
-        优先级：参数 > 环境变量 > 默认值
+        优先级：参数 > config.json > 默认值
 
         Args:
             host: Redis主机地址
@@ -35,11 +34,28 @@ class RedisClient:
             db: 数据库编号
             decode_responses: 是否自动解码响应为字符串
         """
-        # 从环境变量或参数获取配置
-        host = host or os.environ.get('REDIS_HOST', 'localhost')
-        port = port or int(os.environ.get('REDIS_PORT', '6379'))
-        password = password or os.environ.get('REDIS_PASSWORD', '')
-        db = db if db is not None else int(os.environ.get('REDIS_DB', '0'))
+        # 从 config.json 读取配置
+        try:
+            from src.config.config_manager import get_redis_config
+            redis_config = get_redis_config()
+        except Exception as e:
+            logger.warning(f"无法读取 Redis 配置文件: {e}，使用默认配置")
+            redis_config = {}
+
+        # 参数优先，然后是配置文件，最后是默认值
+        host = host or redis_config.get('host', 'localhost')
+        port = port or redis_config.get('port', 6379)
+        password = password or redis_config.get('password', '')
+        db = db if db is not None else redis_config.get('db', 0)
+
+        # 超时和连接池配置
+        socket_connect_timeout = redis_config.get('socket_connect_timeout', 5)
+        socket_timeout = redis_config.get('socket_timeout', 30)
+        max_connections = redis_config.get('max_connections', 50)
+        pubsub_timeout = redis_config.get('pubsub_timeout', 60)
+        pubsub_max_connections = redis_config.get('pubsub_max_connections', 10)
+        blpop_timeout = redis_config.get('blpop_timeout', 300)
+        blpop_max_connections = redis_config.get('blpop_max_connections', 20)
 
         try:
             # 创建连接池（供普通操作使用）
@@ -49,9 +65,9 @@ class RedisClient:
                 password=password,
                 db=db,
                 decode_responses=decode_responses,
-                socket_connect_timeout=5,
-                socket_timeout=30,  # 普通操作 30 秒超时（支持超大章节推送）
-                max_connections=50  # 连接池最大连接数
+                socket_connect_timeout=socket_connect_timeout,
+                socket_timeout=socket_timeout,  # 从配置读取
+                max_connections=max_connections  # 从配置读取
             )
 
             # 创建 pubsub 专用连接池（使用更长超时）
@@ -61,9 +77,9 @@ class RedisClient:
                 password=password,
                 db=db,
                 decode_responses=decode_responses,
-                socket_connect_timeout=5,
-                socket_timeout=60,  # pubsub 60 秒超时，避免频繁重连
-                max_connections=10  # pubsub 连接数较少
+                socket_connect_timeout=socket_connect_timeout,
+                socket_timeout=pubsub_timeout,  # 从配置读取
+                max_connections=pubsub_max_connections  # 从配置读取
             )
 
             # 创建 BLPOP 专用连接池（使用更长超时，避免队列空闲时超时）
@@ -73,16 +89,16 @@ class RedisClient:
                 password=password,
                 db=db,
                 decode_responses=decode_responses,
-                socket_connect_timeout=5,
-                socket_timeout=300,  # BLPOP 300 秒（5分钟）超时，适应长时间空队列
-                max_connections=20  # BLPOP 连接数中等
+                socket_connect_timeout=socket_connect_timeout,
+                socket_timeout=blpop_timeout,  # 从配置读取
+                max_connections=blpop_max_connections  # 从配置读取
             )
 
             self.client = redis.Redis(connection_pool=self.pool)
 
             # 测试连接
             self.client.ping()
-            logger.info(f"Redis连接成功: {host}:{port} (db={db}, pool_size=50, pubsub_pool_size=10, blpop_pool_size=20)")
+            logger.info(f"Redis连接成功: {host}:{port} (db={db}, pool_size={max_connections}, pubsub_pool_size={pubsub_max_connections}, blpop_pool_size={blpop_max_connections})")
         except Exception as e:
             logger.error(f"Redis连接失败: {e}")
             self.client = None
