@@ -5,10 +5,118 @@ Redis客户端管理
 import redis
 import json
 import logging
-from typing import Optional, List, Dict, Any
-from datetime import timedelta
+import os
+import time
+import functools
+import threading
+from typing import Optional, List, Dict, Any, Callable, TypeVar
+from datetime import timedelta, datetime
 
 logger = logging.getLogger(__name__)
+
+
+# 类型变量用于装饰器
+T = TypeVar('T')
+
+
+# ========================================
+# 从配置/环境变量读取重连参数
+# ========================================
+def _load_reconnect_config():
+    """从环境变量或配置文件加载重连配置
+
+    Worker-Service 优先使用环境变量配置
+    """
+    try:
+        # 优先从环境变量读取
+        enabled = os.environ.get('REDIS_RECONNECT_ENABLED', 'true').lower() == 'true'
+        max_retries = int(os.environ.get('REDIS_MAX_RETRIES', '3'))
+        retry_delay = float(os.environ.get('REDIS_RETRY_DELAY', '0.5'))
+        health_check_enabled = os.environ.get('REDIS_HEALTH_CHECK_ENABLED', 'true').lower() == 'true'
+        health_check_interval = int(os.environ.get('REDIS_HEALTH_CHECK_INTERVAL', '60'))
+
+        return {
+            'enabled': enabled,
+            'max_retries': max_retries,
+            'retry_delay': retry_delay,
+            'health_check_enabled': health_check_enabled,
+            'health_check_interval': health_check_interval
+        }
+    except Exception as e:
+        logger.warning(f"无法读取重连配置，使用默认值: {e}")
+        return {
+            'enabled': True,
+            'max_retries': 3,
+            'retry_delay': 0.5,
+            'health_check_enabled': True,
+            'health_check_interval': 60
+        }
+
+
+# 模块级配置变量
+_RECONNECT_CONFIG = _load_reconnect_config()
+
+
+def redis_retry(
+    max_retries: int = None,
+    retry_delay: float = None,
+    exceptions: tuple = (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError)
+):
+    """Redis 操作重试装饰器
+
+    Args:
+        max_retries: 最大重试次数（None则使用配置值）
+        retry_delay: 重试间隔（秒，None则使用配置值）
+        exceptions: 需要重试的异常类型元组
+
+    Returns:
+        装饰器函数
+    """
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            # 使用传入的参数，如果为None则使用配置值
+            actual_max_retries = max_retries if max_retries is not None else _RECONNECT_CONFIG['max_retries']
+            actual_retry_delay = retry_delay if retry_delay is not None else _RECONNECT_CONFIG['retry_delay']
+
+            last_exception = None
+
+            for attempt in range(actual_max_retries):
+                try:
+                    return func(self, *args, **kwargs)
+
+                except exceptions as e:
+                    last_exception = e
+                    if attempt < actual_max_retries - 1:
+                        logger.warning(
+                            f"Redis {func.__name__} 操作失败，"
+                            f"第 {attempt + 1}/{actual_max_retries} 次重试: {e}"
+                        )
+                        time.sleep(actual_retry_delay)
+                        continue
+                    else:
+                        logger.error(
+                            f"Redis {func.__name__} 操作失败，"
+                            f"已重试 {actual_max_retries} 次: {e}"
+                        )
+
+            # 所有重试都失败，返回默认值
+            if last_exception:
+                # 根据函数名返回合适的默认值
+                func_name = func.__name__
+                if func_name in ['get', 'hget', 'brpop', 'blpop', 'lpop', 'rpop']:
+                    return None
+                elif func_name in ['llen', 'scard', 'hlen', 'zcard']:
+                    return 0
+                elif func_name in ['lrange', 'smembers', 'hgetall', 'zrange', 'keys']:
+                    return [] if func_name != 'hgetall' else {}
+                elif func_name in ['set', 'hset', 'lpush', 'rpush', 'sadd', 'zadd', 'delete', 'expire']:
+                    return False
+                else:
+                    return None
+
+        return wrapper
+    return decorator
 
 
 class RedisClient:
@@ -48,6 +156,13 @@ class RedisClient:
         password = password or redis_config.get('password', '')
         db = db if db is not None else redis_config.get('db', 0)
 
+        # 保存连接参数（用于重连）
+        self._host = host
+        self._port = port
+        self._password = password
+        self._db = db
+        self._decode_responses = decode_responses
+
         # 超时和连接池配置
         socket_connect_timeout = redis_config.get('socket_connect_timeout', 5)
         socket_timeout = redis_config.get('socket_timeout', 30)
@@ -56,6 +171,15 @@ class RedisClient:
         pubsub_max_connections = redis_config.get('pubsub_max_connections', 10)
         blpop_timeout = redis_config.get('blpop_timeout', 300)
         blpop_max_connections = redis_config.get('blpop_max_connections', 20)
+
+        # 保存连接池配置（用于重连）
+        self._socket_connect_timeout = socket_connect_timeout
+        self._socket_timeout = socket_timeout
+        self._max_connections = max_connections
+        self._pubsub_timeout = pubsub_timeout
+        self._pubsub_max_connections = pubsub_max_connections
+        self._blpop_timeout = blpop_timeout
+        self._blpop_max_connections = blpop_max_connections
 
         try:
             # 创建连接池（供普通操作使用）
@@ -116,6 +240,89 @@ class RedisClient:
         except:
             return False
 
+    def reconnect(self) -> bool:
+        """主动重连 Redis
+
+        Returns:
+            重连是否成功
+        """
+        logger.info("开始重连 Redis...")
+        try:
+            # 关闭旧连接
+            if self.client:
+                try:
+                    self.client.close()
+                except Exception as e:
+                    logger.debug(f"关闭旧客户端连接时出错（可忽略）: {e}")
+
+            if self.pool:
+                try:
+                    self.pool.disconnect()
+                except Exception as e:
+                    logger.debug(f"断开旧连接池时出错（可忽略）: {e}")
+
+            if self.pubsub_pool:
+                try:
+                    self.pubsub_pool.disconnect()
+                except Exception as e:
+                    logger.debug(f"断开旧 pubsub 连接池时出错（可忽略）: {e}")
+
+            if self.blpop_pool:
+                try:
+                    self.blpop_pool.disconnect()
+                except Exception as e:
+                    logger.debug(f"断开旧 blpop 连接池时出错（可忽略）: {e}")
+
+            # 重新创建连接池
+            self.pool = redis.ConnectionPool(
+                host=self._host,
+                port=self._port,
+                password=self._password,
+                db=self._db,
+                decode_responses=self._decode_responses,
+                socket_connect_timeout=self._socket_connect_timeout,
+                socket_timeout=self._socket_timeout,
+                max_connections=self._max_connections
+            )
+
+            self.pubsub_pool = redis.ConnectionPool(
+                host=self._host,
+                port=self._port,
+                password=self._password,
+                db=self._db,
+                decode_responses=self._decode_responses,
+                socket_connect_timeout=self._socket_connect_timeout,
+                socket_timeout=self._pubsub_timeout,
+                max_connections=self._pubsub_max_connections
+            )
+
+            self.blpop_pool = redis.ConnectionPool(
+                host=self._host,
+                port=self._port,
+                password=self._password,
+                db=self._db,
+                decode_responses=self._decode_responses,
+                socket_connect_timeout=self._socket_connect_timeout,
+                socket_timeout=self._blpop_timeout,
+                max_connections=self._blpop_max_connections
+            )
+
+            # 创建新客户端并测试
+            self.client = redis.Redis(connection_pool=self.pool)
+            self.client.ping()
+
+            logger.info(f"✅ Redis 重连成功: {self._host}:{self._port} (db={self._db})")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Redis 重连失败: {e}")
+            self.client = None
+            self.pool = None
+            self.pubsub_pool = None
+            self.blpop_pool = None
+            return False
+
+    @redis_retry()
     def set(
         self,
         key: str,
@@ -307,18 +514,57 @@ class RedisClient:
         return None
 
     def brpop(self, key: str, timeout: int = 0) -> Optional[Any]:
-        """从列表右侧阻塞弹出值（timeout=0表示永久阻塞）"""
-        if not self.is_connected():
+        """从列表右侧阻塞弹出值（带重连机制）
+
+        Args:
+            key: 队列键名
+            timeout: 超时时间（秒），0 表示永久阻塞
+
+        Returns:
+            弹出的值（自动解析JSON）或 None
+        """
+        if not self.client:
+            logger.error("Redis 客户端未初始化")
             return None
-        try:
-            result = self.client.brpop(key, timeout=timeout)
-            if result is None:
+
+        max_retries = _RECONNECT_CONFIG['max_retries']
+        retry_delay = _RECONNECT_CONFIG['retry_delay']
+
+        for attempt in range(max_retries):
+            try:
+                result = self.client.brpop(key, timeout=timeout)
+
+                if result is None:
+                    # 正常超时，不是错误
+                    return None
+
+                # result 是 tuple: (key, value)
+                key_name, value = result
+                return json.loads(value)
+
+            except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Redis brpop 操作失败 ({key}), "
+                        f"第 {attempt + 1}/{max_retries} 次重试: {e}"
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    logger.error(
+                        f"Redis brpop 连接超时，已重试 {max_retries} 次 ({key}): {e}"
+                    )
+                    return None
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Redis brpop JSON 解析失败 ({key}): {e}")
                 return None
-            key_name, value = result
-            return json.loads(value)
-        except Exception as e:
-            logger.error(f"Redis brpop失败 ({key}): {e}")
-            return None
+
+            except Exception as e:
+                logger.error(f"Redis brpop失败 ({key}): {e}")
+                return None
+
+        return None
 
     def llen(self, key: str) -> int:
         """获取列表长度"""
@@ -609,11 +855,25 @@ _redis_client: Optional[RedisClient] = None
 
 
 def get_redis_client() -> Optional[RedisClient]:
-    """获取Redis客户端单例"""
+    """获取Redis客户端单例（支持自动重连）"""
     global _redis_client
+
     if _redis_client is None:
+        logger.info("首次创建 Redis 客户端")
         _redis_client = RedisClient()
-    return _redis_client if _redis_client.is_connected() else None
+        return _redis_client if _redis_client.is_connected() else None
+
+    # 自动重连机制：检测到连接断开时尝试重连
+    if not _redis_client.is_connected():
+        logger.warning("检测到 Redis 连接断开，尝试重新连接...")
+        if _redis_client.reconnect():
+            logger.info("✅ Redis 自动重连成功")
+            return _redis_client
+        else:
+            logger.error("❌ Redis 自动重连失败")
+            return None
+
+    return _redis_client
 
 
 def close_redis_client():
