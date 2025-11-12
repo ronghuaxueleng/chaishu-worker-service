@@ -163,14 +163,24 @@ class RedisClient:
         self._db = db
         self._decode_responses = decode_responses
 
-        # 超时和连接池配置
-        socket_connect_timeout = redis_config.get('socket_connect_timeout', 5)
-        socket_timeout = redis_config.get('socket_timeout', 30)
-        max_connections = redis_config.get('max_connections', 50)
-        pubsub_timeout = redis_config.get('pubsub_timeout', 60)
-        pubsub_max_connections = redis_config.get('pubsub_max_connections', 10)
-        blpop_timeout = redis_config.get('blpop_timeout', 300)
-        blpop_max_connections = redis_config.get('blpop_max_connections', 20)
+        # 超时和连接池配置（优先级：环境变量 > config.json > 默认值）
+        import os
+
+        # 🔧 修复 Kaggle 连接超时：支持从环境变量读取超时配置，默认值改为 15 秒
+        socket_connect_timeout = int(os.environ.get('REDIS_SOCKET_CONNECT_TIMEOUT',
+                                                      redis_config.get('socket_connect_timeout', 15)))
+        socket_timeout = int(os.environ.get('REDIS_SOCKET_TIMEOUT',
+                                             redis_config.get('socket_timeout', 60)))
+        max_connections = int(os.environ.get('REDIS_MAX_CONNECTIONS',
+                                              redis_config.get('max_connections', 50)))
+        pubsub_timeout = int(os.environ.get('REDIS_PUBSUB_TIMEOUT',
+                                             redis_config.get('pubsub_timeout', 120)))
+        pubsub_max_connections = int(os.environ.get('REDIS_PUBSUB_MAX_CONNECTIONS',
+                                                     redis_config.get('pubsub_max_connections', 10)))
+        blpop_timeout = int(os.environ.get('REDIS_BLPOP_TIMEOUT',
+                                            redis_config.get('blpop_timeout', 300)))
+        blpop_max_connections = int(os.environ.get('REDIS_BLPOP_MAX_CONNECTIONS',
+                                                    redis_config.get('blpop_max_connections', 20)))
 
         # 保存连接池配置（用于重连）
         self._socket_connect_timeout = socket_connect_timeout
@@ -222,9 +232,19 @@ class RedisClient:
 
             # 测试连接
             self.client.ping()
-            logger.info(f"Redis连接成功: {host}:{port} (db={db}, pool_size={max_connections}, pubsub_pool_size={pubsub_max_connections}, blpop_pool_size={blpop_max_connections})")
+            logger.info(f"Redis连接成功: {host}:{port} (db={db}, "
+                       f"connect_timeout={socket_connect_timeout}s, "
+                       f"socket_timeout={socket_timeout}s, "
+                       f"pool_size={max_connections}, "
+                       f"pubsub_pool_size={pubsub_max_connections}, "
+                       f"blpop_pool_size={blpop_max_connections})")
         except Exception as e:
-            logger.error(f"Redis连接失败: {e}")
+            # 🔧 改进错误日志：输出详细的连接参数和错误类型
+            logger.error(f"Redis连接失败: {type(e).__name__}: {e}")
+            logger.error(f"连接参数: host={host}, port={port}, db={db}, "
+                        f"connect_timeout={socket_connect_timeout}s, "
+                        f"socket_timeout={socket_timeout}s")
+            logger.error(f"建议：如果超时，请增加环境变量 REDIS_SOCKET_CONNECT_TIMEOUT（当前={socket_connect_timeout}秒）")
             self.client = None
             self.pool = None
             self.pubsub_pool = None
