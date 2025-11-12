@@ -68,8 +68,14 @@ def enqueue_to_main_queue(task_id: int, provider: str) -> bool:
         key = f"{MAIN_QUEUE_PREFIX}{provider_normalized}"
         item = {"task_id": int(task_id), "provider": provider}
 
+        # 🔍 添加调用栈信息，追踪谁在重复调用
+        import traceback
+        import inspect
+        caller_frame = inspect.currentframe().f_back
+        caller_info = f"{caller_frame.f_code.co_filename}:{caller_frame.f_lineno} in {caller_frame.f_code.co_name}()"
+
         client.rpush(key, item)
-        logger.info(f"任务 {task_id} 已入队到主队列: {provider} (key={key})")
+        logger.info(f"任务 {task_id} 已入队到主队列: {provider} (key={key}) [调用者: {caller_info}]")
         return True
 
     except Exception as e:
@@ -233,3 +239,61 @@ def purge_active_batch(provider: str) -> int:
     except Exception as e:
         logger.error(f"清空活跃批次失败 provider={provider}: {e}")
         return 0
+
+
+def is_task_in_any_queue(task_id: int) -> bool:
+    """检查任务是否已经在任何队列中（主队列或活跃批次）
+
+    Args:
+        task_id: 任务ID
+
+    Returns:
+        bool: True 表示任务已在队列中，False 表示不在队列中
+    """
+    client = get_redis_client()
+    if not client:
+        return False
+
+    try:
+        import json
+        task_id_int = int(task_id)
+
+        # 检查所有主队列
+        for key in client.keys(f"{MAIN_QUEUE_PREFIX}*"):
+            items = client.lrange(key, 0, -1)
+            for item in items:
+                if isinstance(item, dict):
+                    if item.get('task_id') == task_id_int:
+                        logger.debug(f"任务 {task_id} 在主队列 {key} 中")
+                        return True
+                else:
+                    try:
+                        data = json.loads(item)
+                        if data.get('task_id') == task_id_int:
+                            logger.debug(f"任务 {task_id} 在主队列 {key} 中")
+                            return True
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+        # 检查所有活跃批次
+        for key in client.keys(f"{ACTIVE_BATCH_PREFIX}*"):
+            items = client.lrange(key, 0, -1)
+            for item in items:
+                if isinstance(item, dict):
+                    if item.get('task_id') == task_id_int:
+                        logger.debug(f"任务 {task_id} 在活跃批次 {key} 中")
+                        return True
+                else:
+                    try:
+                        data = json.loads(item)
+                        if data.get('task_id') == task_id_int:
+                            logger.debug(f"任务 {task_id} 在活跃批次 {key} 中")
+                            return True
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+        return False
+
+    except Exception as e:
+        logger.error(f"检查任务 {task_id} 是否在队列中失败: {e}")
+        return False

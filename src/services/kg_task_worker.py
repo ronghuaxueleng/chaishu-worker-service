@@ -437,9 +437,15 @@ def reassign_provider_active_tasks(suspended_provider: str) -> int:
         # 4. 重新分配任务
         reassigned_count = 0
         from src.models.database import db_manager, KnowledgeGraphTask
+        from .kg_task_queue_service import is_task_in_any_queue
 
         for task_id in active_tasks:
             try:
+                # 🔥 修复重复入队：先检查任务是否已在其他队列中
+                if is_task_in_any_queue(task_id):
+                    logger.warning(f"[Provider-Suspend] 任务 {task_id} 已在其他队列中，跳过重新入队")
+                    continue
+
                 # 选择第一个可用的Provider（可以改进为负载均衡）
                 target_provider = available_providers[reassigned_count % len(available_providers)]
 
@@ -900,6 +906,14 @@ def get_worker_stats() -> dict:
         prov_map[provider]['queue_length'] = qlen
 
     stats['providers'] = prov_map
+
+    # 🔧 修复：计算总活跃任务数和总 Worker 数
+    total_workers = sum(p['alive'] for p in prov_map.values())
+    total_active_tasks = sum(len(p['active_tasks']) for p in prov_map.values())
+
+    stats['total_workers'] = total_workers
+    stats['total_active_tasks'] = total_active_tasks
+
     return stats
 
 
@@ -1143,7 +1157,7 @@ def start_auto_worker_guard(interval_seconds: int = 30):
             """自动启动待处理任务（排除 running 和 completed）"""
             try:
                 from src.models.database import db_manager, KnowledgeGraphTask
-                from src.services.kg_task_queue_service import enqueue_to_main_queue
+                from src.services.kg_task_queue_service import enqueue_to_main_queue, is_task_in_any_queue
                 from src.api.kg_task_routes import _choose_provider_for_ai_task
 
                 with db_manager.get_session() as session:
@@ -1161,8 +1175,23 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                         logger.info(f"[KG-WorkerGuard] 发现 {len(created_tasks)} 个待启动任务，开始自动入队...")
 
                         enqueued_count = 0
+                        skipped_count = 0
                         for task in created_tasks:
                             try:
+                                # 🔥 修复重复入队：先检查任务是否已在队列中
+                                if is_task_in_any_queue(task.id):
+                                    logger.debug(f"[KG-WorkerGuard] 任务 {task.id} 已在队列中，跳过入队")
+                                    skipped_count += 1
+                                    continue
+
+                                # 🔥 修复：对于失败任务，先重置失败章节状态为 pending
+                                if task.status == 'failed':
+                                    from src.services.knowledge_graph_task_service import kg_task_service
+                                    logger.info(f"[KG-WorkerGuard] 任务 {task.id} ({task.task_name}) 状态为 failed，先重置失败章节")
+                                    if not kg_task_service.retry_failed_chapters(task.id):
+                                        logger.error(f"[KG-WorkerGuard] 任务 {task.id} 重置失败章节失败，跳过入队")
+                                        continue
+
                                 # 选择最优 Provider
                                 if task.use_ai:
                                     provider = _choose_provider_for_ai_task()
@@ -1179,8 +1208,8 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                             except Exception as e:
                                 logger.error(f"[KG-WorkerGuard] 启动任务 {task.id} 失败: {e}")
 
-                        if enqueued_count > 0:
-                            logger.info(f"[KG-WorkerGuard] 成功入队 {enqueued_count} 个任务")
+                        if enqueued_count > 0 or skipped_count > 0:
+                            logger.info(f"[KG-WorkerGuard] 入队 {enqueued_count} 个任务，跳过 {skipped_count} 个已在队列中的任务")
                     except Exception as e:
                         session.rollback()
                         raise
@@ -1204,7 +1233,7 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                 # 1. 获取数据库中所有激活的 AI 服务商
                 with db_manager.get_session() as session:
                     active_providers = session.query(AIProvider.name).filter_by(is_active=True).all()
-                    active_provider_names = {name for (name,) in active_providers}
+                    active_provider_names = {name.lower() for (name,) in active_providers}
                     # 添加 rules 到白名单
                     active_provider_names.add('rules')
 
@@ -1234,8 +1263,8 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                             elif k_str == 'task_id':
                                 task_id = v_str
 
-                        # 3. 检查 provider 是否已被删除
-                        if provider and provider not in active_provider_names:
+                        # 3. 检查 provider 是否已被删除（大小写不敏感比较）
+                        if provider and provider.lower() not in active_provider_names:
                             if provider not in deleted_provider_workers:
                                 deleted_provider_workers[provider] = []
                             deleted_provider_workers[provider].append({
@@ -1324,6 +1353,11 @@ def start_auto_worker_guard(interval_seconds: int = 30):
 
                                         new_provider = _choose_provider_for_ai_task()
 
+                                        # 🔥 修复重复入队 bug：检查新 provider 是否和被清理的 provider 相同
+                                        if new_provider.lower() == provider.lower():
+                                            logger.warning(f"[KG-WorkerGuard] 活跃批次任务 {task_id_int} 的新 provider 和被清理的 provider 相同 ({provider})，跳过入队以避免无限循环")
+                                            continue
+
                                         if enqueue_to_main_queue(task_id_int, new_provider):
                                             requeued_from_queue += 1
                                             logger.debug(f"[KG-WorkerGuard] 活跃批次任务 {task_id_int} 已从 {provider} 重新入队到 {new_provider}")
@@ -1346,6 +1380,11 @@ def start_auto_worker_guard(interval_seconds: int = 30):
                                             continue
 
                                         new_provider = _choose_provider_for_ai_task()
+
+                                        # 🔥 修复重复入队 bug：检查新 provider 是否和被清理的 provider 相同
+                                        if new_provider.lower() == provider.lower():
+                                            logger.warning(f"[KG-WorkerGuard] 主队列任务 {task_id_int} 的新 provider 和被清理的 provider 相同 ({provider})，跳过入队以避免无限循环")
+                                            continue
 
                                         if enqueue_to_main_queue(task_id_int, new_provider):
                                             requeued_from_queue += 1
