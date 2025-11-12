@@ -343,6 +343,54 @@ def _list_active_providers() -> List[str]:
         return []
 
 
+def _list_providers_by_tags(tags: List[str]) -> List[str]:
+    """根据标签查询激活的 AIProvider 名称列表
+
+    Args:
+        tags: 标签列表，只要Provider包含其中任一标签即可
+
+    Returns:
+        符合条件的激活Provider名称列表
+    """
+    try:
+        from src.models.database import db_manager, AIProvider
+        import json
+
+        if not tags:
+            logger.warning("[KG-Worker] 标签列表为空，返回空provider列表")
+            return []
+
+        with db_manager.get_session() as session:
+            # 查询所有激活的 AIProvider
+            providers_query = session.query(AIProvider).filter_by(is_active=True).all()
+
+            matched_providers = []
+            for provider in providers_query:
+                # 检查provider的tags字段
+                provider_tags = provider.tags if provider.tags else []
+
+                # 如果tags不是列表，尝试解析
+                if not isinstance(provider_tags, list):
+                    try:
+                        provider_tags = json.loads(provider_tags) if provider_tags else []
+                    except:
+                        provider_tags = []
+
+                # 检查是否包含任一指定标签
+                for tag in tags:
+                    if tag in provider_tags:
+                        matched_providers.append(provider.name)
+                        logger.debug(f"[KG-Worker] Provider '{provider.name}' 匹配标签 '{tag}'")
+                        break  # 匹配到一个标签即可，避免重复添加
+
+            logger.info(f"[KG-Worker] 按标签 {tags} 筛选，找到 {len(matched_providers)} 个激活的Provider: {matched_providers}")
+            return matched_providers
+
+    except Exception as e:
+        logger.error(f"按标签加载 AIProvider 列表失败: {e}")
+        return []
+
+
 def reassign_provider_active_tasks(suspended_provider: str) -> int:
     """将被暂停Provider的所有活跃任务重新分配到其他Provider
 
@@ -572,11 +620,12 @@ def _cleanup_stale_worker_registrations() -> int:
         return 0
 
 
-def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: bool = True, per_provider_processes: int = 1):
+def start_kg_task_workers(providers: Optional[List[str]] = None, tags: Optional[List[str]] = None, include_rules: bool = True, per_provider_processes: int = 1):
     """启动 Provider Worker 进程（带严格保护机制）
 
     Args:
         providers: 指定provider名称；为空则读取激活的AIProvider
+        tags: 按标签筛选providers；优先级高于providers参数
         include_rules: 是否包含 'rules' 规则提取进程
         per_provider_processes: 每个provider启动的进程数（默认1）
     """
@@ -587,8 +636,15 @@ def start_kg_task_workers(providers: Optional[List[str]] = None, include_rules: 
         # 若已启动，仍允许为新增的provider补齐进程（避免整体跳过）
         # 故不直接 return，而是继续走后续逻辑计算需要新起的providers
 
-        if providers is None:
+        # Provider 选择逻辑（优先级：tags > providers > auto-discovery）
+        if tags:
+            # 优先使用标签筛选
+            providers = _list_providers_by_tags(tags)
+            logger.info(f"[KG-Worker] 按标签 {tags} 筛选到 {len(providers)} 个Provider")
+        elif providers is None:
+            # 自动发现所有激活的 Provider
             providers = _list_active_providers()
+
         providers = [p.strip() for p in (providers or []) if p]
         if include_rules and 'rules' not in providers:
             providers.append('rules')
