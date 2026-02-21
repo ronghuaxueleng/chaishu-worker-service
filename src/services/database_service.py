@@ -235,7 +235,7 @@ class DatabaseService:
             if tag_filter:
                 # 对于MySQL/PostgreSQL，使用JSON_CONTAINS
                 # 对于SQLite，使用简单的LIKE查询
-                if 'mysql' in str(session.bind.url):
+                if getattr(session.bind, 'dialect', None) and session.bind.dialect.name == 'mysql':
                     query = query.filter(func.json_contains(Novel.tags, f'"{tag_filter}"'))
                 else:
                     # SQLite fallback
@@ -769,7 +769,13 @@ class DatabaseService:
                     if hasattr(provider, key):
                         old_value = getattr(provider, key)
                         setattr(provider, key, value)
-                        logger.info(f"更新字段 {key}: {old_value} -> {value}")
+                        _SENSITIVE_KEYS = {'api_key', 'secret', 'token', 'password', 'key'}
+                        if any(s in key.lower() for s in _SENSITIVE_KEYS):
+                            masked_old = (str(old_value)[:4] + '***') if old_value else 'None'
+                            masked_new = (str(value)[:4] + '***') if value else 'None'
+                            logger.info(f"更新字段 {key}: {masked_old} -> {masked_new}")
+                        else:
+                            logger.info(f"更新字段 {key}: {old_value} -> {value}")
                     else:
                         logger.warning(f"字段 {key} 不存在于AIProvider模型中")
                 provider.updated_at = beijing_now()

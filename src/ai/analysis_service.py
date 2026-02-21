@@ -4,7 +4,7 @@ import traceback
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
-from jinja2 import Template
+from jinja2.sandbox import SandboxedEnvironment
 
 from src.ai.ai_service import get_ai_manager, AIServiceException
 from src.services.database_service import db_service
@@ -26,7 +26,8 @@ class AnalysisService:
     def render_prompt(self, template_content: str, variables: Dict[str, Any]) -> str:
         """渲染提示词模板"""
         try:
-            template = Template(template_content)
+            env = SandboxedEnvironment()
+            template = env.from_string(template_content)
             return template.render(**variables)
         except Exception as e:
             logger.error(f"提示词模板渲染失败: {str(e)}\n堆栈信息:\n{traceback.format_exc()}")

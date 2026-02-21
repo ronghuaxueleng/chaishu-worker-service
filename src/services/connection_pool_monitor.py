@@ -37,7 +37,8 @@ class ConnectionPoolMonitor:
         self.high_usage_threshold = 0.8  # 80% 占用率告警
         self.critical_usage_threshold = 0.95  # 95% 占用率严重告警
 
-        # 统计数据
+        # 统计数据（使用锁保护并发读写）
+        self._stats_lock = threading.Lock()
         self.stats_history: List[Dict[str, Any]] = []
         self.max_history_size = 60  # 保留最近 60 条记录（1小时）
 
@@ -124,11 +125,11 @@ class ConnectionPoolMonitor:
 
     def _add_stats(self, stats: Dict[str, Any]):
         """添加统计记录"""
-        self.stats_history.append(stats)
-
-        # 限制历史记录大小
-        if len(self.stats_history) > self.max_history_size:
-            self.stats_history.pop(0)
+        with self._stats_lock:
+            self.stats_history.append(stats)
+            # 限制历史记录大小
+            if len(self.stats_history) > self.max_history_size:
+                self.stats_history.pop(0)
 
     def _check_alerts(self, stats: Dict[str, Any]):
         """检查告警条件"""
@@ -161,8 +162,9 @@ class ConnectionPoolMonitor:
     def _diagnose_high_usage(self, stats: Dict[str, Any]):
         """诊断高占用率原因"""
         # 分析历史趋势
-        if len(self.stats_history) >= 5:
-            recent = self.stats_history[-5:]
+        with self._stats_lock:
+            recent = list(self.stats_history[-5:])
+        if len(recent) >= 5:
             avg_usage = sum(s['usage_ratio'] for s in recent) / len(recent)
 
             if avg_usage >= self.high_usage_threshold:
@@ -204,14 +206,16 @@ class ConnectionPoolMonitor:
 
     def get_statistics(self) -> Dict[str, Any]:
         """获取统计信息"""
-        if not self.stats_history:
-            return {
-                'error': '暂无统计数据',
-                'timestamp': datetime.now().isoformat()
-            }
+        with self._stats_lock:
+            if not self.stats_history:
+                return {
+                    'error': '暂无统计数据',
+                    'timestamp': datetime.now().isoformat()
+                }
+            snapshot = list(self.stats_history)
+            history_size = len(snapshot)
 
-        # 计算统计指标
-        recent = self.stats_history[-10:]  # 最近 10 分钟
+        recent = snapshot[-10:]  # 最近 10 分钟
 
         avg_usage = sum(s['usage_ratio'] for s in recent) / len(recent)
         max_usage = max(s['usage_ratio'] for s in recent)
@@ -221,7 +225,7 @@ class ConnectionPoolMonitor:
         max_checked_out = max(s['checked_out'] for s in recent)
 
         return {
-            'monitoring_duration_minutes': len(self.stats_history),
+            'monitoring_duration_minutes': history_size,
             'recent_10min': {
                 'avg_usage': round(avg_usage, 4),
                 'max_usage': round(max_usage, 4),
@@ -230,7 +234,7 @@ class ConnectionPoolMonitor:
                 'max_checked_out': max_checked_out
             },
             'current': self.get_current_status(),
-            'history_size': len(self.stats_history),
+            'history_size': history_size,
             'timestamp': datetime.now().isoformat()
         }
 

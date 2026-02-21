@@ -2,6 +2,7 @@
 知识图谱配置服务
 """
 import logging
+import threading
 from typing import Optional, Dict, Any
 from ..models.database import db_manager, KnowledgeGraphConfig
 
@@ -10,21 +11,30 @@ logger = logging.getLogger(__name__)
 
 class KnowledgeGraphConfigService:
     """知识图谱配置服务"""
-    
+
     def __init__(self):
         self._default_config = None
-    
+        self._config_lock = threading.Lock()  # 防止并发初始化竞态
+
     def get_default_config(self) -> Optional[KnowledgeGraphConfig]:
-        """获取默认配置（带缓存）"""
-        if self._default_config is None:
+        """获取默认配置（带缓存，双重检查锁定）"""
+        # 第一次检查（无锁，快速路径）
+        if self._default_config is not None:
+            return self._default_config
+
+        with self._config_lock:
+            # 第二次检查（持锁，防止重复初始化）
+            if self._default_config is not None:
+                return self._default_config
+
             with db_manager.get_session() as session:
                 try:
-                    self._default_config = session.query(KnowledgeGraphConfig).filter_by(
+                    config = session.query(KnowledgeGraphConfig).filter_by(
                         is_default=True
                     ).first()
 
                     # 如果没有默认配置，创建一个基础配置
-                    if not self._default_config:
+                    if not config:
                         logger.warning("未找到默认知识图谱配置，使用基础配置")
                         # 返回一个临时配置对象，不保存到数据库
                         class TempConfig:
@@ -67,6 +77,11 @@ class KnowledgeGraphConfigService:
                                 }
 
                         self._default_config = TempConfig()
+                    else:
+                        # 将 ORM 对象从 session 中安全分离（expunge），
+                        # 使其可在 session 关闭后继续访问已加载的属性
+                        session.expunge(config)
+                        self._default_config = config
                 except Exception as e:
                     session.rollback()
                     raise
